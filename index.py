@@ -12,7 +12,6 @@ pillow_heif.register_heif_opener()
 
 # ===== Google Sheets認証 =====
 if "GCP_CREDENTIALS" in os.environ:
-    # GitHub Actions（Secretsから読み込み）
     creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
     creds = Credentials.from_service_account_info(
         creds_dict,
@@ -20,9 +19,8 @@ if "GCP_CREDENTIALS" in os.environ:
     )
     gc = gspread.authorize(creds)
 else:
-    # ローカル環境（JSONファイルから読み込み）
     gc = gspread.service_account(filename="shodo-test-f1825a5fea87.json")
-
+    
 # スプレッドシートのキーで開く
 sh = gc.open_by_key("1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q")
 worksheet = sh.sheet1  # 1枚目のシートを利用
