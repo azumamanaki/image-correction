@@ -1,14 +1,29 @@
+import os
+import json
 import gspread
 import requests
 from io import BytesIO
 import numpy as np
 import pillow_heif
 from PIL import Image
+from google.oauth2.service_account import Credentials
 
 pillow_heif.register_heif_opener()
 
-# Google Sheets認証
-gc = gspread.service_account(filename='shodo-test-f1825a5fea87.json')
+# ===== Google Sheets認証 =====
+if "GCP_CREDENTIALS" in os.environ:
+    # GitHub Actions（Secretsから読み込み）
+    creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(creds)
+else:
+    # ローカル環境（JSONファイルから読み込み）
+    gc = gspread.service_account(filename="shodo-test-f1825a5fea87.json")
+
+# スプレッドシートのキーで開く
 sh = gc.open_by_key("1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q")
 worksheet = sh.sheet1  # 1枚目のシートを利用
 
@@ -40,7 +55,8 @@ def trim_paper_hsv(image, sat_thresh, val_thresh):
 def process_latest_link():
     all_rows = worksheet.get_all_values()
 
-    for row in all_rows[1:]:  # 1行目はヘッダ想定
+    # ヘッダ行を除く
+    for i, row in enumerate(all_rows[1:], start=2):  # start=2 → スプレッドシート上の行番号
         filename, direct_link, date = row
 
         if direct_link in processed_links:
@@ -59,6 +75,10 @@ def process_latest_link():
             print(f"Saved corrected image to {save_name}")
 
             processed_links.add(direct_link)
+
+            # 処理後、この行を削除（スプレッドシート上）
+            worksheet.delete_rows(i)
+            print(f"Deleted row {i} from Google Sheets.")
 
         except Exception as e:
             print(f"Error processing {filename}: {e}")
