@@ -112,6 +112,14 @@ def process_latest_links():
             # トリミング
             trimmed = trim_paper_hsv(img)
 
+            # 縦横を調整（縦長にする）
+            if trimmed.width > trimmed.height:
+                trimmed = trimmed.rotate(90, expand=True)
+
+            # A4サイズにリサイズ
+            a4_size = (2480, 3508)
+            trimmed = trimmed.resize(a4_size, Image.LANCZOS)
+
             # ローカル保存（Dropboxアップロード用）
             trimmed.save(save_name, format="PNG")
             print(f"Saved corrected image to {save_name}")
