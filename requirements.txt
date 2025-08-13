@@ -4,3 +4,4 @@ Pillow
 requests
 numpy
 pillow_heif
+dropbox
