@@ -10,16 +10,12 @@ from google.oauth2.service_account import Credentials
 
 pillow_heif.register_heif_opener()
 
-# 認証処理（環境変数GCP_CREDENTIALSがあればそれを使い、なければファイルを使う）
-if "GCP_CREDENTIALS" in os.environ:
-    creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    gc = gspread.authorize(creds)
-else:
-    gc = gspread.service_account(filename="shodo-test-f1825a5fea87.json")
+creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
+creds = Credentials.from_service_account_info(
+    creds_dict,
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
+gc = gspread.authorize(creds)
 
 # スプレッドシートを開く（スプレッドシートIDを実際のものに置き換えてください）
 SPREADSHEET_KEY = "1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q"
