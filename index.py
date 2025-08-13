@@ -8,6 +8,7 @@ from PIL import Image
 import gspread
 from google.oauth2.service_account import Credentials
 import dropbox
+import cv2
 
 # ===== 設定 =====
 DROPBOX_FOLDER = "/印刷用/"  # Dropbox内のフォルダ
@@ -32,6 +33,32 @@ dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
 processed_links = set()
 
+# ----- 傾き補正 -----
+def deskew_image(pil_img):
+    """Pillow画像を入力として傾き補正して返す"""
+    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bw = 255 - bw  # 黒文字/線が白になるよう反転
+
+    coords = np.column_stack(np.where(bw > 0))
+    if coords.size == 0:
+        return pil_img  # 検出できなければ元画像を返す
+
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+
+    (h, w) = img_cv.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(img_cv, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
+
+# ----- トリミング -----
 def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
     """HSV空間で白に近い領域をトリミング"""
     img = image.convert("RGB")
@@ -52,6 +79,7 @@ def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
 
     return img.crop((x0, y0, x1, y1))
 
+# ----- メイン処理 -----
 def process_latest_links():
     all_rows = worksheet.get_all_values()
 
@@ -68,7 +96,7 @@ def process_latest_links():
             resp = requests.get(direct_link)
             resp.raise_for_status()
 
-            # HEICかPNGか判定して処理
+            # 拡張子判定
             ext = os.path.splitext(filename)[1].lower()
             if ext == ".heic":
                 heif_file = pillow_heif.read_heif(BytesIO(resp.content))
@@ -77,6 +105,9 @@ def process_latest_links():
             else:
                 img = Image.open(BytesIO(resp.content))
                 save_name = f"corrected_{filename}"
+
+            # 傾き補正
+            img = deskew_image(img)
 
             # トリミング
             trimmed = trim_paper_hsv(img)
