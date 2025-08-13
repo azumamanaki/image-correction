@@ -5,4 +5,4 @@ requests
 numpy
 pillow_heif
 dropbox
-cv2
+opencv-python
