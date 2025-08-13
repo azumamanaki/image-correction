@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 
 pillow_heif.register_heif_opener()
 
-# Google Sheets認証（ローカルはファイル、GitHub Actionsは環境変数）
+# 認証処理（環境変数GCP_CREDENTIALSがあればそれを使い、なければファイルを使う）
 if "GCP_CREDENTIALS" in os.environ:
     creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
     creds = Credentials.from_service_account_info(
@@ -21,12 +21,12 @@ if "GCP_CREDENTIALS" in os.environ:
 else:
     gc = gspread.service_account(filename="shodo-test-f1825a5fea87.json")
 
-# スプレッドシートを開く（キーは実際のスプレッドシートIDに置き換えてください）
+# スプレッドシートを開く（スプレッドシートIDを実際のものに置き換えてください）
 SPREADSHEET_KEY = "1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q"
 sh = gc.open_by_key(SPREADSHEET_KEY)
-worksheet = sh.sheet1  # 1枚目のシートを利用
+worksheet = sh.sheet1  # 1枚目のシートを使用
 
-# すでに処理したリンクを記録するセット（実行間持続しないため、必要ならスプレッドシートで管理推奨）
+# 処理済みURL管理（必要に応じてスプレッドシートでの管理に改修推奨）
 processed_links = set()
 
 def trim_paper_hsv(image, sat_thresh, val_thresh):
@@ -54,7 +54,10 @@ def process_latest_links():
     all_rows = worksheet.get_all_values()
 
     for row_index, row in enumerate(all_rows[1:], start=2):  # 1行目はヘッダー、row_indexはシートの行番号
-        filename, direct_link, *_ = row  # 3列目以降は無視
+        if len(row) < 2:
+            continue  # 行にデータが足りなければスキップ
+
+        filename, direct_link, *rest = row
 
         if direct_link in processed_links:
             continue
@@ -73,7 +76,7 @@ def process_latest_links():
 
             processed_links.add(direct_link)
 
-            # 処理済みならスプレッドシートの該当行を削除する例
+            # 処理済みならスプレッドシートの該当行を削除
             worksheet.delete_rows(row_index)
             print(f"Deleted processed row {row_index} from sheet.")
 
