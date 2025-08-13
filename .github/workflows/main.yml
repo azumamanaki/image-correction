@@ -2,24 +2,27 @@ name: Run Image Correction
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # UTC時間で6時間ごと（日本時間なら午前3時、9時、15時、21時）
+    - cron: "0 */6 * * *"  # UTCで6時間ごと（日本時間だと午前3時,9時,15時,21時）
   workflow_dispatch:      # 手動トリガーも可能
 
 jobs:
   image_correction:
     runs-on: ubuntu-latest
 
+    env:
+      GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+
     steps:
-    - name: Check out repository
-      uses: actions/checkout@v3
+      - name: Check out repository
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
 
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-    - name: Run the correction script
-      run: python index.py
+      - name: Run the correction script
+        run: python index.py
