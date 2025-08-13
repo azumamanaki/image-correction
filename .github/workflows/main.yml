@@ -2,7 +2,7 @@ name: Run Image Correction
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # UTCで6時間ごと（日本時間だと午前3時,9時,15時,21時）
+    - cron: "0 * * * *"  # 毎時0分に実行
   workflow_dispatch:      # 手動トリガーも可能
 
 jobs:
