@@ -21,8 +21,5 @@ jobs:
     - name: Install dependencies
       run: pip install -r requirements.txt
 
-    - name: Create credentials.json from secret
-      run: echo "${{ secrets.GCP_CREDENTIALS }}" > credentials.json
-
     - name: Run the correction script
       run: python index.py
