@@ -6,3 +6,4 @@ numpy
 pillow_heif
 dropbox
 opencv-python
+pdf2image
