@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import dropbox
 import cv2
-from pdf2image import convert_from_bytes  # 追加
+import fitz  # PyMuPDF
 
 # ===== 設定 =====
 DROPBOX_FOLDER = "/印刷用/"
@@ -21,6 +21,7 @@ DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
 # ===== 初期化 =====
 pillow_heif.register_heif_opener()
 
+# Googleサービスアカウント認証
 creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
 creds = Credentials.from_service_account_info(
     creds_dict,
@@ -31,6 +32,7 @@ sh = gc.open_by_key(SPREADSHEET_KEY)
 worksheet = sh.sheet1
 
 def get_access_token():
+    """Refresh Token から新しい Access Token を取得"""
     data = {
         "grant_type": "refresh_token",
         "refresh_token": DROPBOX_REFRESH_TOKEN,
@@ -81,6 +83,17 @@ def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
     y1, x1 = coords.max(axis=0) + 1
     return img.crop((x0, y0, x1, y1))
 
+# ----- PDFをPillow画像に変換 -----
+def pdf_to_images(pdf_bytes):
+    """PDF バイト列をページごとに Pillow 画像に変換"""
+    images = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append((i + 1, img))  # ページ番号と画像
+    return images
+
 # ----- メイン処理 -----
 def process_latest_links():
     all_rows = worksheet.get_all_values()
@@ -95,35 +108,39 @@ def process_latest_links():
             resp = requests.get(direct_link)
             resp.raise_for_status()
             ext = os.path.splitext(filename)[1].lower()
-
-            images = []
             if ext == ".heic":
                 heif_file = pillow_heif.read_heif(BytesIO(resp.content))
                 img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw")
-                images = [img]
+                images = [(None, img)]
             elif ext == ".pdf":
-                images = convert_from_bytes(resp.content)
+                images = pdf_to_images(resp.content)
             else:
                 img = Image.open(BytesIO(resp.content))
-                images = [img]
+                images = [(None, img)]
 
-            for i, img in enumerate(images):
+            for page_num, img in images:
+                # 傾き補正
                 img = deskew_image(img)
+                # トリミング
                 trimmed = trim_paper_hsv(img)
+                # 縦横調整
                 if trimmed.width > trimmed.height:
                     trimmed = trimmed.rotate(90, expand=True)
+                # 半紙サイズにリサイズ
                 hanshi_size = (2890, 3953)
                 trimmed = trimmed.resize(hanshi_size, Image.LANCZOS)
+                # 保存名
                 save_name = f"corrected_{os.path.splitext(filename)[0]}"
-                if ext == ".pdf":
-                    save_name += f"_page{i+1}.png"
-                else:
-                    save_name += ".png"
+                if page_num:
+                    save_name += f"_page{page_num}"
+                save_name += ".png"
+                # 保存
                 trimmed.save(save_name, format="PNG")
+                print(f"Saved and uploaded {save_name}")
+                # Dropbox アップロード
                 dropbox_path = os.path.join(DROPBOX_FOLDER, os.path.basename(save_name))
                 with open(save_name, "rb") as f:
                     dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
-                print(f"Saved and uploaded {save_name}")
 
             processed_links.add(direct_link)
             worksheet.delete_rows(row_index)
