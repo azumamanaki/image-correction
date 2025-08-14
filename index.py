@@ -13,7 +13,9 @@ import cv2
 # ===== 設定 =====
 DROPBOX_FOLDER = "/印刷用/"  # Dropbox内のフォルダ
 SPREADSHEET_KEY = "1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q"
-DROPBOX_ACCESS_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
+DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
+DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
+DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
 
 # ===== 初期化 =====
 pillow_heif.register_heif_opener()
@@ -28,7 +30,22 @@ gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_KEY)
 worksheet = sh.sheet1
 
+def get_access_token():
+    """Refresh Token から新しい Access Token を取得"""
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_CLIENT_ID,
+        "client_secret": DROPBOX_CLIENT_SECRET
+    }
+    resp = requests.post("https://api.dropbox.com/oauth2/token", data=data)
+    resp.raise_for_status()
+    tokens = resp.json()
+    return tokens["access_token"]
+
+
 # Dropbox初期化
+DROPBOX_ACCESS_TOKEN = get_access_token()
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
 processed_links = set()
