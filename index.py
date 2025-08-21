@@ -35,24 +35,46 @@ dbx = dropbox.Dropbox(get_access_token())
 
 # ===== 画像補正 =====
 def deskew_image(pil_img):
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    # PIL → OpenCV BGR
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    
+    # グレースケール & 二値化
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw
+    bw = 255 - bw  # 白黒反転
     coords = np.column_stack(np.where(bw > 0))
+    
     if coords.size == 0:
         print("  [deskew] 有効な座標なし → 補正スキップ")
         return pil_img
+
+    # 最小回転矩形から角度取得
     angle = cv2.minAreaRect(coords)[-1]
     if angle < -45:
         angle = -(90 + angle)
     else:
         angle = -angle
     print(f"  [deskew] 回転角度: {angle:.2f}°")
+
     (h, w) = img_cv.shape[:2]
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(img_cv, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    # 回転
+    rotated = cv2.warpAffine(img_cv, M, (w, h),
+                             flags=cv2.INTER_CUBIC,
+                             borderMode=cv2.BORDER_REPLICATE)
+
+    # ±90°近くの回転なら幅と高さを入れ替える
+    if abs(angle) > 45:
+        rotated = cv2.transpose(rotated)  # 転置で90°回転
+        rotated = cv2.flip(rotated, 0)    # 必要に応じて上下反転
+
+    # OpenCV → PIL
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
 def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
