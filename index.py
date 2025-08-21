@@ -33,56 +33,53 @@ def get_access_token():
 
 dbx = dropbox.Dropbox(get_access_token())
 
-# ===== 画像補正 =====
-def deskew_image(pil_img):
-    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+# ===== 半紙検出 =====
+def extract_hanshi(image, output_size=(2480, 3508)):
+    """書道の半紙を検出し透視変換で正面化する"""
+    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw
-    coords = np.column_stack(np.where(bw > 0))
-    
-    if coords.size == 0:
-        print("  [deskew] 有効な座標なし → 補正スキップ")
-        return pil_img
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 50, 150)
 
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    print(f"  [deskew] 回転角度: {angle:.2f}°")
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
-    (h, w) = img_cv.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(img_cv, M, (w, h),
-                             flags=cv2.INTER_CUBIC,
-                             borderMode=cv2.BORDER_REPLICATE)
+    hanshi_contour = None
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, 0.02*cv2.arcLength(cnt, True), True)
+        if len(approx) == 4:
+            hanshi_contour = approx
+            break
 
-    # ±85°以上なら転置回転
-    if abs(angle) > 85:
-        rotated = cv2.transpose(rotated)
-        rotated = cv2.flip(rotated, 0)
-        print(f"  [deskew] ±85°以上 → 転置回転適用")
+    if hanshi_contour is None:
+        print("  [hanshi] 半紙検出失敗 → 元画像を使用")
+        return image
 
-    return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
+    # 頂点を (左上,右上,右下,左下) に並べ替え
+    pts = hanshi_contour.reshape(4, 2)
+    rect = np.zeros((4, 2), dtype="float32")
 
-def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
-    img = image.convert("RGB")
-    hsv_img = img.convert("HSV")
-    np_hsv = np.array(hsv_img)
-    s = np_hsv[:, :, 1]
-    v = np_hsv[:, :, 2]
-    white_mask = (s <= sat_thresh) & (v >= val_thresh)
-    coords = np.argwhere(white_mask)
-    if coords.size == 0:
-        print("  [trim] 白背景領域なし → トリミングスキップ")
-        return img
-    y0, x0 = coords.min(axis=0)
-    y1, x1 = coords.max(axis=0) + 1
-    print(f"  [trim] トリミング範囲: x={x0}:{x1}, y={y0}:{y1}")
-    return img.crop((x0, y0, x1, y1))
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # 左上
+    rect[2] = pts[np.argmax(s)]   # 右下
 
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # 右上
+    rect[3] = pts[np.argmax(diff)]  # 左下
+
+    dst = np.array([
+        [0, 0],
+        [output_size[0]-1, 0],
+        [output_size[0]-1, output_size[1]-1],
+        [0, output_size[1]-1]], dtype="float32")
+
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warp = cv2.warpPerspective(img_cv, M, output_size)
+
+    print("  [hanshi] 半紙検出・透視変換成功")
+    return Image.fromarray(cv2.cvtColor(warp, cv2.COLOR_BGR2RGB))
+
+# ===== Dropboxファイル処理 =====
 def pdf_to_images(pdf_bytes):
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -93,7 +90,6 @@ def pdf_to_images(pdf_bytes):
         print(f"  [pdf] {i+1} ページ目を画像化 (size={pix.width}x{pix.height})")
     return images
 
-# ===== Dropboxファイル処理 =====
 def process_file(file_metadata):
     file_path = file_metadata.path_lower
     file_name = os.path.basename(file_path)
@@ -132,26 +128,13 @@ def process_file(file_metadata):
         for idx, img in enumerate(images):
             print(f"  [PROC] {idx+1}枚目 補正開始")
 
-            # 初期縦横判定（横長なら回転）
+            img = extract_hanshi(img, output_size=(2480, 3508))
+
             w, h = img.size
             if w > h:
                 img = img.rotate(90, expand=True)
-                print(f"  [INIT ROTATE] 横長画像 → 90°回転")
-            else:
-                print(f"  [INIT ROTATE] 縦長画像 → 回転なし")
+                print(f"  [ROTATE] 横長検出 → 90°回転")
 
-            # deskew
-            img = deskew_image(img)
-
-            # trim
-            img = trim_paper_hsv(img)
-
-            # deskew+trim後の縦横判定（ログ用）
-            w, h = img.size
-            ratio = w / h
-            print(f"  [orientation] サイズ w={w}, h={h}, ratio={ratio:.2f}")
-
-            # A4リサイズ（縦長 2480x3508）
             img = img.resize((2480, 3508), Image.LANCZOS)
             print(f"  [PROC] A4サイズにリサイズ ({img.width}x{img.height})")
 
