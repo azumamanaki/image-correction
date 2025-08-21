@@ -21,7 +21,6 @@ SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 # ===== 初期化 =====
 def get_access_token():
-    """Refresh Token から新しい Access Token を取得"""
     data = {
         "grant_type": "refresh_token",
         "refresh_token": DROPBOX_REFRESH_TOKEN,
@@ -82,7 +81,15 @@ def process_file(file_metadata):
     file_path = file_metadata.path_lower
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
+
+    # 対象外の拡張子なら補正失敗フォルダに移動して終了
     if ext not in SUPPORTED_EXTS:
+        fail_dest = f"{DROPBOX_FAILED_FOLDER}/{os.path.basename(file_path)}"
+        try:
+            dbx.files_move_v2(file_path, fail_dest, autorename=True)
+            print(f"Unsupported extension, moved to failed: {file_path}")
+        except Exception as e:
+            print(f"Failed moving unsupported file {file_path}: {e}")
         return
 
     try:
@@ -90,33 +97,36 @@ def process_file(file_metadata):
         _, res = dbx.files_download(file_path)
         data = res.content
 
-        images = []
+        # 画像読み込み
         if ext == ".pdf":
             images = pdf_to_images(data)
         else:  # png/jpeg/jpg
             img = Image.open(io.BytesIO(data))
             images = [img]
 
+        # 補正処理
         processed_images = []
         for img in images:
             img = deskew_image(img)
             img = trim_paper_hsv(img)
             if img.width > img.height:
                 img = img.rotate(90, expand=True)
-            # A4サイズにリサイズ
-            img = img.resize((2480, 3508), Image.LANCZOS)
+            img = img.resize((2480, 3508), Image.LANCZOS)  # A4サイズ
             processed_images.append(img)
 
-        # PDF に変換して保存
+        # PDF に変換
         pdf_bytes = io.BytesIO()
         processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
         pdf_bytes.seek(0)
 
         # 添削用印刷未にアップロード
         dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(os.path.basename(file_path))[0]}.pdf"
-        dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
+        try:
+            dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
+        except Exception as e:
+            raise RuntimeError(f"PDF upload failed: {e}")
 
-        # 元ファイルを補正済元画像に移動
+        # アップロード成功したら元ファイルを補正済元画像に移動
         processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{os.path.basename(file_path)}"
         dbx.files_move_v2(file_path, processed_dest, autorename=True)
         print(f"Processed and moved: {file_path}")
