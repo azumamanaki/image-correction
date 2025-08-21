@@ -152,15 +152,16 @@ def process_file(file_metadata):
             # trim
             img = trim_paper_hsv(img)
 
-            # deskew後のサイズで縦横判定
+            # deskew + trim 後のサイズで縦横判定
             w, h = img.size
-            if w > h:
+            aspect_ratio = w / h
+            if aspect_ratio > 1.05:  # 横長なら回転
                 img = img.rotate(90, expand=True)
                 print("  [PROC] deskew後横長判定 → 90°回転")
             else:
                 print("  [PROC] deskew後縦長判定 → 回転なし")
 
-            # A4リサイズ
+            # A4リサイズ（縦長 2480x3508）
             img = img.resize((2480, 3508), Image.LANCZOS)
             print(f"  [PROC] A4サイズにリサイズ ({img.width}x{img.height})")
 
