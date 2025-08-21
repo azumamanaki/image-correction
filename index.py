@@ -35,20 +35,16 @@ dbx = dropbox.Dropbox(get_access_token())
 
 # ===== 画像補正 =====
 def deskew_image(pil_img):
-    # PIL → OpenCV BGR
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    
-    # グレースケール & 二値化
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw  # 白黒反転
+    bw = 255 - bw
     coords = np.column_stack(np.where(bw > 0))
     
     if coords.size == 0:
         print("  [deskew] 有効な座標なし → 補正スキップ")
         return pil_img
 
-    # 最小回転矩形から角度取得
     angle = cv2.minAreaRect(coords)[-1]
     if angle < -45:
         angle = -(90 + angle)
@@ -62,8 +58,13 @@ def deskew_image(pil_img):
     rotated = cv2.warpAffine(img_cv, M, (w, h),
                              flags=cv2.INTER_CUBIC,
                              borderMode=cv2.BORDER_REPLICATE)
-    # 転置回転は行わず傾き補正のみ
-    print(f"  [deskew] 回転後サイズ: {rotated.shape[1]}x{rotated.shape[0]} (w x h)")
+
+    # ±85°以上なら転置回転
+    if abs(angle) > 85:
+        rotated = cv2.transpose(rotated)
+        rotated = cv2.flip(rotated, 0)
+        print(f"  [deskew] ±85°以上 → 転置回転適用")
+
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
 def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
@@ -111,13 +112,11 @@ def process_file(file_metadata):
         return
 
     try:
-        # ダウンロード
         print("  [DL] ダウンロード中...")
         _, res = dbx.files_download(file_path)
         data = res.content
         print(f"  [DL] ダウンロード完了 ({len(data)} bytes)")
 
-        # 画像読み込み
         if ext == ".pdf":
             print("  [LOAD] PDF → 画像変換開始")
             images = pdf_to_images(data)
@@ -129,10 +128,17 @@ def process_file(file_metadata):
             print(f"  [LOAD] 読み込み完了 size={img.width}x{img.height}")
             images = [img]
 
-        # 補正処理
         processed_images = []
         for idx, img in enumerate(images):
             print(f"  [PROC] {idx+1}枚目 補正開始")
+
+            # 初期縦横判定（横長なら回転）
+            w, h = img.size
+            if w > h:
+                img = img.rotate(90, expand=True)
+                print(f"  [INIT ROTATE] 横長画像 → 90°回転")
+            else:
+                print(f"  [INIT ROTATE] 縦長画像 → 回転なし")
 
             # deskew
             img = deskew_image(img)
@@ -140,37 +146,28 @@ def process_file(file_metadata):
             # trim
             img = trim_paper_hsv(img)
 
-            # 縦横判定: 横長なら90°回転
+            # deskew+trim後の縦横判定（ログ用）
             w, h = img.size
-            aspect_ratio = w / h
-            print(f"  [orientation] サイズ w={w}, h={h}, ratio={aspect_ratio:.2f}")
-            if aspect_ratio > 1.05:
-                img = img.rotate(90, expand=True)
-                print("  [orientation] 横長判定 → 90°回転")
-            else:
-                print("  [orientation] 縦長判定 → 回転なし")
+            ratio = w / h
+            print(f"  [orientation] サイズ w={w}, h={h}, ratio={ratio:.2f}")
 
-            # A4リサイズ
+            # A4リサイズ（縦長 2480x3508）
             img = img.resize((2480, 3508), Image.LANCZOS)
             print(f"  [PROC] A4サイズにリサイズ ({img.width}x{img.height})")
 
             processed_images.append(img)
 
-        # PDF 生成
         pdf_bytes = io.BytesIO()
         processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
         pdf_bytes.seek(0)
-        print("  [PDF] PDF生成完了")
 
-        # アップロード
         dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(file_name)[0]}.pdf"
         dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
-        print(f"  [UPLOAD] {dest_pdf_path} にアップロード完了")
+        print(f"[UPLOAD] {dest_pdf_path} にアップロード完了")
 
-        # 元ファイル移動
         processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{file_name}"
         dbx.files_move_v2(file_path, processed_dest, autorename=True)
-        print(f"  [MOVE] 元ファイルを {processed_dest} に移動完了")
+        print(f"[MOVE] 元ファイルを {processed_dest} に移動完了")
 
         print(f"✅ 成功: {file_name}")
 
