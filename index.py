@@ -3,7 +3,7 @@ import io
 import dropbox
 import requests
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import cv2
 import fitz  # PyMuPDF
 
@@ -82,7 +82,7 @@ def process_file(file_metadata):
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
 
-    # 対象外の拡張子なら補正失敗フォルダに移動して終了
+    # 対象外の拡張子は補正失敗に移動
     if ext not in SUPPORTED_EXTS:
         fail_dest = f"{DROPBOX_FAILED_FOLDER}/{os.path.basename(file_path)}"
         try:
@@ -93,7 +93,7 @@ def process_file(file_metadata):
         return
 
     try:
-        # Dropbox からダウンロード
+        # Dropboxからダウンロード
         _, res = dbx.files_download(file_path)
         data = res.content
 
@@ -102,6 +102,8 @@ def process_file(file_metadata):
             images = pdf_to_images(data)
         else:  # png/jpeg/jpg
             img = Image.open(io.BytesIO(data))
+            img = ImageOps.exif_transpose(img)  # EXIF回転を反映
+            img = img.convert("RGB")  # PDF化前にRGBに変換
             images = [img]
 
         # 補正処理
@@ -114,10 +116,13 @@ def process_file(file_metadata):
             img = img.resize((2480, 3508), Image.LANCZOS)  # A4サイズ
             processed_images.append(img)
 
-        # PDF に変換
+        # PDF に変換（例外をここで捕捉）
         pdf_bytes = io.BytesIO()
-        processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
-        pdf_bytes.seek(0)
+        try:
+            processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
+            pdf_bytes.seek(0)
+        except Exception as e:
+            raise RuntimeError(f"PDF creation failed: {e}")
 
         # 添削用印刷未にアップロード
         dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(os.path.basename(file_path))[0]}.pdf"
@@ -132,7 +137,7 @@ def process_file(file_metadata):
         print(f"Processed and moved: {file_path}")
 
     except Exception as e:
-        # 補正失敗 → 補正失敗フォルダに移動
+        # 失敗時は補正失敗フォルダに移動
         fail_dest = f"{DROPBOX_FAILED_FOLDER}/{os.path.basename(file_path)}"
         try:
             dbx.files_move_v2(file_path, fail_dest, autorename=True)
