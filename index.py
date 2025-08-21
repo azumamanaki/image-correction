@@ -21,8 +21,21 @@ SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 # ===== デバッグ設定 =====
 DEBUG_SAVE = True
-DEBUG_SAVE_DIR = "/おうち書道/共有データ/【受講生】/【添削用　作品】/_debug"
-os.makedirs(DEBUG_SAVE_DIR, exist_ok=True)
+DEBUG_FOLDER = DROPBOX_SRC_FOLDER + "/_debug"
+
+def save_debug_image(img_pil, name):
+    """PIL Image をDropbox _debugフォルダに保存"""
+    if not DEBUG_SAVE:
+        return
+    img_bytes = io.BytesIO()
+    img_pil.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+    path = f"{DEBUG_FOLDER}/{name}"
+    try:
+        dbx.files_upload(img_bytes.read(), path, mode=dropbox.files.WriteMode("overwrite"))
+        print(f"[DEBUG_SAVE] {path} に保存")
+    except Exception as e:
+        print(f"[ERROR] デバッグ画像アップロード失敗 {path}: {e}")
 
 # ===== 初期化 =====
 def get_access_token():
@@ -60,9 +73,13 @@ def extract_hanshi(image, output_size=(2480, 3508), file_name="debug", idx=0):
         vis_img = img_cv.copy()
         if hanshi_contour is not None:
             cv2.drawContours(vis_img, [hanshi_contour], -1, (0,0,255), 2)
-        debug_path = os.path.join(DEBUG_SAVE_DIR, f"debug_contour_{file_name}_{idx}.png")
-        Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)).save(debug_path)
-        print(f"[DEBUG_SAVE] {debug_path} に輪郭保存")
+        save_debug_image(Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)),
+                        f"debug_contour_{file_name}_{idx}.png")
+
+    # 透視変換後
+    if DEBUG_SAVE:
+        save_debug_image(Image.fromarray(cv2.cvtColor(warp, cv2.COLOR_BGR2RGB)),
+                        f"debug_warp_{file_name}_{idx}.png")
 
     if hanshi_contour is None:
         print("  [hanshi] 半紙検出失敗 → 元画像を使用")
