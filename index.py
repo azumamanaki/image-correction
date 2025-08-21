@@ -39,43 +39,61 @@ def deskew_image(pil_img):
     import numpy as np
     from PIL import Image
 
-    # PIL → OpenCV BGR
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    
-    # グレースケール & 二値化
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw  # 白黒反転
+    bw = 255 - bw
     coords = np.column_stack(np.where(bw > 0))
-    
+
     if coords.size == 0:
         print("  [deskew] 有効な座標なし → 補正スキップ")
         return pil_img
 
     # 最小回転矩形から角度取得
     angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
+
+    # ログ用: coords の最小・最大
+    y0, x0 = coords.min(axis=0)
+    y1, x1 = coords.max(axis=0)
+    print(f"  [deskew] coords min/max: x={x0}:{x1}, y={y0}:{y1}")
+
+    # ±5°以内は回転不要とみなす
+    if -5 <= angle <= 5:
+        angle = 0.0
+    elif angle < -45:
         angle = -(90 + angle)
     else:
         angle = -angle
+
     print(f"  [deskew] 回転角度: {angle:.2f}°")
 
     (h, w) = img_cv.shape[:2]
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    # 回転
     rotated = cv2.warpAffine(img_cv, M, (w, h),
                              flags=cv2.INTER_CUBIC,
                              borderMode=cv2.BORDER_REPLICATE)
 
-    # ±90°近くの回転なら幅と高さを入れ替える
-    if abs(angle) > 45:
-        rotated = cv2.transpose(rotated)  # 転置で90°回転
-        rotated = cv2.flip(rotated, 0)    # 必要に応じて上下反転
+    # ±85°以上の極端な角度のみ転置回転
+    if abs(angle) > 85:
+        rotated = cv2.transpose(rotated)
+        rotated = cv2.flip(rotated, 0)
+        print(f"  [deskew] ±85°以上 → 転置回転適用")
 
-    # OpenCV → PIL
+    print(f"  [deskew] 回転後サイズ: {rotated.shape[1]}x{rotated.shape[0]} (w x h)")
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
+
+def process_image_orientation(img):
+    """deskew + trim 後の縦横判定"""
+    w, h = img.size
+    aspect_ratio = w / h
+    print(f"  [orientation] サイズ w={w}, h={h}, ratio={aspect_ratio:.2f}")
+    if aspect_ratio > 1.05:  # 横長なら回転
+        img = img.rotate(90, expand=True)
+        print("  [orientation] 横長判定 → 90°回転")
+    else:
+        print("  [orientation] 縦長判定 → 回転なし")
+    return img
 
 def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
     img = image.convert("RGB")
@@ -151,6 +169,8 @@ def process_file(file_metadata):
 
             # trim
             img = trim_paper_hsv(img)
+
+            img = process_image_orientation(img)
 
             # deskew + trim 後のサイズで縦横判定
             w, h = img.size
