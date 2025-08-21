@@ -1,9 +1,6 @@
-gspread
-google-auth
 Pillow
 requests
 numpy
-pillow_heif
 dropbox
 opencv-python
 PyMuPDF
