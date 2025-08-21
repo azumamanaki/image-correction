@@ -124,20 +124,19 @@ def process_file(file_metadata):
         for idx, img in enumerate(images):
             print(f"  [PROC] {idx+1}枚目 補正開始")
 
-            original_width, original_height = img.width, img.height
-
             # deskew
             img = deskew_image(img)
 
             # trim
             img = trim_paper_hsv(img)
 
-            # 横長判定（元画像ベース）
-            if original_width > original_height:
+            # deskew後のサイズで縦横判定
+            w, h = img.size
+            if w > h:
                 img = img.rotate(90, expand=True)
-                print("  [PROC] 元画像横長判定 → 90°回転")
+                print("  [PROC] deskew後横長判定 → 90°回転")
             else:
-                print("  [PROC] 元画像縦長判定 → 回転なし")
+                print("  [PROC] deskew後縦長判定 → 回転なし")
 
             # A4リサイズ
             img = img.resize((2480, 3508), Image.LANCZOS)
