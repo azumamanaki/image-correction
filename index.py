@@ -1,36 +1,25 @@
 import os
-import json
-import requests
-from io import BytesIO
-import numpy as np
-import pillow_heif
-from PIL import Image
-import gspread
-from google.oauth2.service_account import Credentials
+import io
 import dropbox
+import requests
+import numpy as np
+from PIL import Image
 import cv2
 import fitz  # PyMuPDF
 
 # ===== 設定 =====
-DROPBOX_FOLDER = "/印刷用/"
-SPREADSHEET_KEY = "1x4Cxp4YA-8uFG2PHlcDp4WBzHpWUxWOGao7bicejH8Q"
-DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
 DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
 DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
+DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
+
+DROPBOX_SRC_FOLDER = "/おうち書道/共有データ/【受講生】/【添削用　作品】"
+DROPBOX_PRINT_FOLDER = DROPBOX_SRC_FOLDER + "/添削用印刷未"
+DROPBOX_PROCESSED_FOLDER = DROPBOX_SRC_FOLDER + "/補正済元画像"
+DROPBOX_FAILED_FOLDER = DROPBOX_SRC_FOLDER + "/補正失敗"
+
+SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 # ===== 初期化 =====
-pillow_heif.register_heif_opener()
-
-# Googleサービスアカウント認証
-creds_dict = json.loads(os.environ["GCP_CREDENTIALS"])
-creds = Credentials.from_service_account_info(
-    creds_dict,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
-gc = gspread.authorize(creds)
-sh = gc.open_by_key(SPREADSHEET_KEY)
-worksheet = sh.sheet1
-
 def get_access_token():
     """Refresh Token から新しい Access Token を取得"""
     data = {
@@ -41,14 +30,11 @@ def get_access_token():
     }
     resp = requests.post("https://api.dropbox.com/oauth2/token", data=data)
     resp.raise_for_status()
-    tokens = resp.json()
-    return tokens["access_token"]
+    return resp.json()["access_token"]
 
-DROPBOX_ACCESS_TOKEN = get_access_token()
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-processed_links = set()
+dbx = dropbox.Dropbox(get_access_token())
 
-# ----- 傾き補正 -----
+# ===== 画像補正 =====
 def deskew_image(pil_img):
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
@@ -68,7 +54,6 @@ def deskew_image(pil_img):
     rotated = cv2.warpAffine(img_cv, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
-# ----- トリミング -----
 def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
     img = image.convert("RGB")
     hsv_img = img.convert("HSV")
@@ -83,70 +68,74 @@ def trim_paper_hsv(image, sat_thresh=30, val_thresh=200):
     y1, x1 = coords.max(axis=0) + 1
     return img.crop((x0, y0, x1, y1))
 
-# ----- PDFをPillow画像に変換 -----
 def pdf_to_images(pdf_bytes):
-    """PDF バイト列をページごとに Pillow 画像に変換"""
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for i, page in enumerate(doc):
+    for page in doc:
         pix = page.get_pixmap()
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        images.append((i + 1, img))  # ページ番号と画像
+        images.append(img)
     return images
 
-# ----- メイン処理 -----
-def process_latest_links():
-    all_rows = worksheet.get_all_values()
-    for row_index, row in enumerate(all_rows[1:], start=2):
-        if len(row) < 2:
-            continue
-        filename, direct_link, *rest = row
-        if direct_link in processed_links:
-            continue
+# ===== Dropboxファイル処理 =====
+def process_file(file_metadata):
+    file_path = file_metadata.path_lower
+    _, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+    if ext not in SUPPORTED_EXTS:
+        return
+
+    try:
+        # Dropbox からダウンロード
+        _, res = dbx.files_download(file_path)
+        data = res.content
+
+        images = []
+        if ext == ".pdf":
+            images = pdf_to_images(data)
+        else:  # png/jpeg/jpg
+            img = Image.open(io.BytesIO(data))
+            images = [img]
+
+        processed_images = []
+        for img in images:
+            img = deskew_image(img)
+            img = trim_paper_hsv(img)
+            if img.width > img.height:
+                img = img.rotate(90, expand=True)
+            # A4サイズにリサイズ
+            img = img.resize((2480, 3508), Image.LANCZOS)
+            processed_images.append(img)
+
+        # PDF に変換して保存
+        pdf_bytes = io.BytesIO()
+        processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
+        pdf_bytes.seek(0)
+
+        # 添削用印刷未にアップロード
+        dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(os.path.basename(file_path))[0]}.pdf"
+        dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
+
+        # 元ファイルを補正済元画像に移動
+        processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{os.path.basename(file_path)}"
+        dbx.files_move_v2(file_path, processed_dest, autorename=True)
+        print(f"Processed and moved: {file_path}")
+
+    except Exception as e:
+        # 補正失敗 → 補正失敗フォルダに移動
+        fail_dest = f"{DROPBOX_FAILED_FOLDER}/{os.path.basename(file_path)}"
         try:
-            print(f"Downloading {filename} from {direct_link} ...")
-            resp = requests.get(direct_link)
-            resp.raise_for_status()
-            ext = os.path.splitext(filename)[1].lower()
-            if ext == ".heic":
-                heif_file = pillow_heif.read_heif(BytesIO(resp.content))
-                img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data, "raw")
-                images = [(None, img)]
-            elif ext == ".pdf":
-                images = pdf_to_images(resp.content)
-            else:
-                img = Image.open(BytesIO(resp.content))
-                images = [(None, img)]
+            dbx.files_move_v2(file_path, fail_dest, autorename=True)
+        except:
+            pass
+        print(f"Failed processing {file_path}: {e}")
 
-            for page_num, img in images:
-                # 傾き補正
-                img = deskew_image(img)
-                # トリミング
-                trimmed = trim_paper_hsv(img)
-                # 縦横調整
-                if trimmed.width > trimmed.height:
-                    trimmed = trimmed.rotate(90, expand=True)
-                # 半紙サイズにリサイズ
-                hanshi_size = (2890, 3953)
-                trimmed = trimmed.resize(hanshi_size, Image.LANCZOS)
-                # 保存名
-                save_name = f"corrected_{os.path.splitext(filename)[0]}"
-                if page_num:
-                    save_name += f"_page{page_num}"
-                save_name += ".png"
-                # 保存
-                trimmed.save(save_name, format="PNG")
-                print(f"Saved and uploaded {save_name}")
-                # Dropbox アップロード
-                dropbox_path = os.path.join(DROPBOX_FOLDER, os.path.basename(save_name))
-                with open(save_name, "rb") as f:
-                    dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
-
-            processed_links.add(direct_link)
-            worksheet.delete_rows(row_index)
-            print(f"Deleted processed row {row_index} from sheet.")
-        except Exception as e:
-            print(f"Error processing {filename}: {e}")
+# ===== メイン =====
+def main():
+    res = dbx.files_list_folder(DROPBOX_SRC_FOLDER)
+    for entry in res.entries:
+        if isinstance(entry, dropbox.files.FileMetadata):
+            process_file(entry)
 
 if __name__ == "__main__":
-    process_latest_links()
+    main()
