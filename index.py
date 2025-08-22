@@ -69,7 +69,7 @@ def deskew_image(pil_img):
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     bw = 255 - bw
     coords = np.column_stack(np.where(bw > 0))
-
+    
     if coords.size == 0:
         print("  [deskew] 有効な座標なし → 補正スキップ")
         return pil_img
@@ -88,7 +88,12 @@ def deskew_image(pil_img):
                              flags=cv2.INTER_CUBIC,
                              borderMode=cv2.BORDER_REPLICATE)
 
-    # 転置回転は行わず、傾き補正のみ
+    # ±85°以上なら転置回転
+    if abs(angle) > 85:
+        rotated = cv2.transpose(rotated)
+        rotated = cv2.flip(rotated, 0)
+        print(f"  [deskew] ±85°以上 → 転置回転適用")
+
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
 # ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
