@@ -112,12 +112,6 @@ def deskew_image(pil_img, file_name="img", page_idx=0, debug=True):
     return result_img
 # ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
 def trim_paper_cv(pil_img, output_width=2400, debug=True, file_name="img", page_idx=0):
-    """
-    OpenCV版半紙トリミング（文字・反射除去、輪郭ベース）
-    - pil_img: PIL Image
-    - output_width: 出力幅
-    - debug: Trueなら debug画像を保存
-    """
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
@@ -127,18 +121,24 @@ def trim_paper_cv(pil_img, output_width=2400, debug=True, file_name="img", page_
     kernel = np.ones((7,7), np.uint8)
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # 輪郭抽出
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         print("  [trim_cv] 半紙輪郭が検出できず → 元画像返却")
         return pil_img
 
-    # 最大輪郭を選択
     largest_contour = max(contours, key=cv2.contourArea)
     approx = cv2.approxPolyDP(largest_contour, 0.02*cv2.arcLength(largest_contour, True), True)
 
-    # 頂点を左上→右上→右下→左下
-    pts = approx.reshape(-1,2)
+    # ----- ここから補正 -----
+    if len(approx) == 4:
+        pts = approx.reshape(4,2)
+    else:
+        # 多角形なら最小外接矩形を使用
+        rect = cv2.minAreaRect(largest_contour)  # ((cx,cy),(w,h),angle)
+        pts = cv2.boxPoints(rect)  # 4頂点
+        pts = np.array(pts, dtype=np.float32)
+
+    # 頂点を左上→右上→右下→左下に順序化
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
     ordered_pts = np.zeros((4,2), dtype=np.float32)
@@ -146,22 +146,21 @@ def trim_paper_cv(pil_img, output_width=2400, debug=True, file_name="img", page_
     ordered_pts[2] = pts[np.argmax(s)]
     ordered_pts[1] = pts[np.argmin(diff)]
     ordered_pts[3] = pts[np.argmax(diff)]
+    # ----- 補正ここまで -----
 
-    # 半紙比率
+    # 射影変換
     aspect_ratio = 334/244
     output_height = round(output_width * aspect_ratio)
     dst = np.float32([[0,0],[output_width-1,0],[output_width-1,output_height-1],[0,output_height-1]])
-
-    # 射影変換
     M = cv2.getPerspectiveTransform(ordered_pts, dst)
     warped = cv2.warpPerspective(img_cv, M, (output_width, output_height))
 
     # デバッグ
     if debug:
         debug_img = img_cv.copy()
-        cv2.drawContours(debug_img, [approx], -1, (0,0,255), 3)
+        cv2.drawContours(debug_img, [ordered_pts.astype(int)], -1, (0,0,255), 3)
         debug_pil = Image.fromarray(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB))
-        save_debug_to_dropbox(debug_pil, f"debug_hanshi_{file_name}_{page_idx}.png")
+        save_debug_to_dropbox(debug_pil, DROPBOX_DEBUG_FOLDER, f"trim_{file_name}_{page_idx}.png")
 
     return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 # ===== A4 に余白配置（歪ませずフィット） =====
