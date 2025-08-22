@@ -61,55 +61,6 @@ def save_debug_to_dropbox(pil_img, name):
         print(f"  [DEBUG_SAVE] {path} に保存")
     except Exception as e:
         print(f"  [DEBUG_SAVE_ERROR] {e}")
-
-# ===== deskew （従来の minAreaRect ベース、転置は行わない） =====
-def deskew_image(pil_img, file_name="img", page_idx=0, debug=True):
-    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw
-    coords = np.column_stack(np.where(bw > 0))
-    
-    if coords.size == 0:
-        print("  [deskew] 有効な座標なし → 補正スキップ")
-        return pil_img
-
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    print(f"  [deskew] 回転角度: {angle:.2f}°")
-
-    (h, w) = img_cv.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(img_cv, M, (w, h),
-                             flags=cv2.INTER_CUBIC,
-                             borderMode=cv2.BORDER_REPLICATE)
-
-    # ±85°以上なら転置回転
-    if abs(angle) > 85:
-        rotated = cv2.transpose(rotated)
-        rotated = cv2.flip(rotated, 0)
-        print(f"  [deskew] ±85°以上 → 転置回転適用")
-
-    result_img = Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
-
-    # デバッグ用 Dropbox 保存
-    if debug:
-        debug_pil = result_img.copy()
-        debug_name = f"deskew_{file_name}_{page_idx}.png"
-        debug_folder = "_debug_傾き補正"
-        try:
-            dbx.files_upload(io.BytesIO(debug_pil.tobytes()).getvalue(),
-                             f"{DROPBOX_SRC_FOLDER}/{debug_folder}/{debug_name}",
-                             mode=dropbox.files.WriteMode("overwrite"))
-            print(f"  [DEBUG_SAVE] 傾き補正画像を {debug_folder}/{debug_name} に保存")
-        except Exception as e:
-            print(f"  [DEBUG_SAVE_ERROR] {e}")
-
-    return result_img
 # ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
 def trim_paper_cv(pil_img, output_width=2400, debug=True, file_name="img", page_idx=0):
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -225,14 +176,11 @@ def process_file(file_metadata, sat_thresh=30, val_thresh=200):
         for idx, img in enumerate(images):
             print(f"  [PROC] {idx+1}枚目 補正開始")
 
-            # 1) deskew（傾き補正）
-            img = deskew_image(img, file_name=file_name, page_idx=idx, debug=DEBUG_SAVE)
-
-            # 2) trim（HSVベースの白領域トリミング） --- あなたの関数を採用
+            # 1) trim（HSVベースの白領域トリミング） --- あなたの関数を採用
             img_trimmed = trim_paper_cv(img, output_width=2400,
                              debug=DEBUG_SAVE, file_name=file_name, page_idx=idx)
 
-            # 3) 補正後の向き確認（縦長化）
+            # 2) 補正後の向き確認（縦長化）
             w, h = img_trimmed.size
             if w > h:
                 img_trimmed = img_trimmed.rotate(90, expand=True)
