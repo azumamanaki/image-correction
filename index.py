@@ -22,7 +22,7 @@ DROPBOX_DEBUG_FOLDER = DROPBOX_SRC_FOLDER + "/_debug"
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 # ===== デバッグ =====
-DEBUG_SAVE = True  # Trueにすると debug画像を Dropbox/_debug に保存
+DEBUG_SAVE = False  # Trueにすると debug画像を Dropbox/_debug に保存
 
 # ===== Dropbox 初期化 =====
 def get_access_token():
