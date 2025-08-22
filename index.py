@@ -22,7 +22,7 @@ DROPBOX_DEBUG_FOLDER = DROPBOX_SRC_FOLDER + "/_debug"
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 # ===== デバッグ =====
-DEBUG_SAVE = False  # Trueにすると debug画像を Dropbox/_debug に保存
+DEBUG_SAVE = True  # Trueにすると debug画像を Dropbox/_debug に保存
 
 # ===== Dropbox 初期化 =====
 def get_access_token():
@@ -63,7 +63,7 @@ def save_debug_to_dropbox(pil_img, name):
         print(f"  [DEBUG_SAVE_ERROR] {e}")
 
 # ===== deskew （従来の minAreaRect ベース、転置は行わない） =====
-def deskew_image(pil_img):
+def deskew_image(pil_img, debug=True, file_name="img", page_idx=0):
     img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -88,16 +88,22 @@ def deskew_image(pil_img):
                              flags=cv2.INTER_CUBIC,
                              borderMode=cv2.BORDER_REPLICATE)
 
-    # ±85°以上なら転置回転
     if abs(angle) > 85:
         rotated = cv2.transpose(rotated)
         rotated = cv2.flip(rotated, 0)
         print(f"  [deskew] ±85°以上 → 転置回転適用")
 
-    return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
+    result_pil = Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
+    # デバッグ保存
+    if debug:
+        debug_name = f"debug_deskew_{file_name}_{page_idx}.png"
+        save_debug_to_dropbox(result_pil, debug_name)
+        print(f"  [DEBUG] 傾き補正後画像を {debug_name} に保存")
+
+    return result_pil
 # ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
-def trim_paper_cv(pil_img, output_width=2400, debug=False, file_name="img", page_idx=0):
+def trim_paper_cv(pil_img, output_width=2400, debug=True, file_name="img", page_idx=0):
     """
     OpenCV版半紙トリミング（文字・反射除去、輪郭ベース）
     - pil_img: PIL Image
@@ -213,7 +219,7 @@ def process_file(file_metadata, sat_thresh=30, val_thresh=200):
             print(f"  [PROC] {idx+1}枚目 補正開始")
 
             # 1) deskew（傾き補正）
-            img = deskew_image(img)
+            img = deskew_image(img, debug=DEBUG_SAVE, file_name=file_name, page_idx=idx)
 
             # 2) trim（HSVベースの白領域トリミング） --- あなたの関数を採用
             img_trimmed = trim_paper_cv(img, output_width=2400,
