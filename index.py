@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import io
 import dropbox
@@ -7,7 +8,7 @@ from PIL import Image, ImageOps
 import cv2
 import fitz  # PyMuPDF
 
-# ===== 設定 =====
+# ===== 設定（必須環境変数） =====
 DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
 DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
 DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
@@ -20,10 +21,10 @@ DROPBOX_DEBUG_FOLDER = DROPBOX_SRC_FOLDER + "/_debug"
 
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
-# ===== デバッグ保存フラグ =====
-DEBUG_SAVE = False  # Trueにすると中間画像をDropbox/_debugへ保存
+# ===== デバッグ =====
+DEBUG_SAVE = True  # Trueにすると debug画像を Dropbox/_debug に保存
 
-# ===== 初期化 =====
+# ===== Dropbox 初期化 =====
 def get_access_token():
     data = {
         "grant_type": "refresh_token",
@@ -37,261 +38,122 @@ def get_access_token():
 
 dbx = dropbox.Dropbox(get_access_token())
 
-# ===== ユーティリティ =====
-def _put_debug(img_bgr, name_hint):
+# debugフォルダ作成（なければ）
+if DEBUG_SAVE:
+    try:
+        dbx.files_get_metadata(DROPBOX_DEBUG_FOLDER)
+    except Exception:
+        try:
+            dbx.files_create_folder_v2(DROPBOX_DEBUG_FOLDER)
+        except Exception:
+            pass
+
+def save_debug_to_dropbox(pil_img, name):
+    """PIL Image を DROPBOX_DEBUG_FOLDER/name として保存（overwrite）"""
     if not DEBUG_SAVE:
         return
     try:
-        os.makedirs("/mnt/data/_tmp", exist_ok=True)
-        path = f"/mnt/data/_tmp/{name_hint}.png"
-        cv2.imwrite(path, img_bgr)
-        with open(path, "rb") as f:
-            dbx.files_upload(f.read(), f"{DROPBOX_DEBUG_FOLDER}/{name_hint}.png", mode=dropbox.files.WriteMode("overwrite"))
+        bio = io.BytesIO()
+        pil_img.save(bio, format="PNG")
+        bio.seek(0)
+        path = f"{DROPBOX_DEBUG_FOLDER}/{name}"
+        dbx.files_upload(bio.read(), path, mode=dropbox.files.WriteMode("overwrite"))
+        print(f"  [DEBUG_SAVE] {path} に保存")
     except Exception as e:
-        print(f"[DEBUG_SAVE_ERROR] {e}")
+        print(f"  [DEBUG_SAVE_ERROR] {e}")
 
-
-def _order_quad(pts):
-    # 4x2 -> 4x2 (tl, tr, br, bl)
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]  # tl
-    rect[2] = pts[np.argmax(s)]  # br
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]  # tr
-    rect[3] = pts[np.argmax(diff)]  # bl
-    return rect
-
-
-def _auto_canny(img, sigma=0.33):
-    v = np.median(img)
-    lower = int(max(0, (1.0 - sigma) * v))
-    upper = int(min(255, (1.0 + sigma) * v))
-    return cv2.Canny(img, lower, upper)
-
-
-def detect_hanshi_quad(img_bgr):
-    """半紙の四隅(台形)を検出して返す。失敗時はNone。
-    - 白・低彩度の領域 + エッジを統合
-    - ラベリングで最大候補を抽出
-    - 4点近似 or minAreaRectで矩形候補
-    候補は矩形度・面積・アスペクト比でスコアリング。
-    """
-    H, W = img_bgr.shape[:2]
-    max_dim = max(H, W)
-    scale = 1024 / max_dim if max_dim > 1024 else 1.0
-    small = cv2.resize(img_bgr, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
-    h, w = small.shape[:2]
-
-    # ---- 色空間で白紙マスク（LAB） ----
-    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
-    L, A, Bc = cv2.split(lab)
-    # OpenCVのLABはa,bが128中心。低彩度＝a,bが128付近
-    C = cv2.absdiff(A, 128) + cv2.absdiff(Bc, 128)
-    # しきい値（必要に応じて微調整）
-    L_thr = 200  # 明るさ
-    C_thr = 20   # 彩度（小さいほどグレー/白）
-    mask_white = ((L > L_thr) & (C < C_thr)).astype(np.uint8) * 255
-
-    k = max(3, int(0.01 * max(h, w)) | 1)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    mask_white = cv2.morphologyEx(mask_white, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_white = cv2.morphologyEx(mask_white, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    _put_debug(mask_white, "01_mask_white")
-
-    # ---- エッジ検出 ----
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = _auto_canny(blur)
-    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
-
-    _put_debug(edges, "02_edges")
-
-    # ---- マスク統合 ----
-    mask = cv2.bitwise_or(mask_white, edges)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    _put_debug(mask, "03_mask_merged")
-
-    # ---- ラベリングで最大候補 ----
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if num <= 1:
-        print("  [hanshi] ラベリング失敗")
-        return None
-    # 最初のラベル0は背景
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    best_idx = 1 + np.argmax(areas)
-    cand = np.zeros_like(mask)
-    cand[labels == best_idx] = 255
-
-    _put_debug(cand, "04_largest_component")
-
-    # ---- 輪郭 → 4点近似 or 最小外接矩形 ----
-    contours, _ = cv2.findContours(cand, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        print("  [hanshi] 輪郭なし")
-        return None
-
-    cnt = max(contours, key=cv2.contourArea)
-    peri = cv2.arcLength(cnt, True)
-    approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-
-    if len(approx) == 4:
-        quad = approx.reshape(4, 2).astype(np.float32)
-    else:
-        rect = cv2.minAreaRect(cnt)
-        quad = cv2.boxPoints(rect).astype(np.float32)
-
-    # 元サイズへスケールバック
-    quad /= scale
-    quad = _order_quad(quad)
-
-    dbg = img_bgr.copy()
-    cv2.polylines(dbg, [quad.astype(np.int32)], True, (0, 255, 0), 3)
-    _put_debug(dbg, "05_quad_on_image")
-
-    # 妥当性チェック（面積・比率）
-    area = cv2.contourArea(quad.astype(np.float32))
-    frac = area / (W * H)
-    print(f"  [hanshi] quad面積比: {frac:.3f}")
-    if frac < 0.1:  # 小さすぎる候補は無効
-        print("  [hanshi] 面積が小さすぎ → 無視")
-        return None
-
-    # アスペクト（縦長前提で評価）
-    wA = np.linalg.norm(quad[1] - quad[0])
-    wB = np.linalg.norm(quad[2] - quad[3])
-    hA = np.linalg.norm(quad[3] - quad[0])
-    hB = np.linalg.norm(quad[2] - quad[1])
-    est_w = (wA + wB) / 2
-    est_h = (hA + hB) / 2
-    ar = max(est_w, est_h) / max(1.0, min(est_w, est_h))
-    print(f"  [hanshi] 推定アスペクト比: {ar:.3f}")
-
-    return quad
-
-
-def warp_by_quad_to_portrait(img_bgr, quad):
-    # quadを使って透視変換し、縦長に整える
-    quad = _order_quad(quad.astype(np.float32))
-    # 出力サイズを四辺の平均長から決める
-    wA = np.linalg.norm(quad[1] - quad[0])
-    wB = np.linalg.norm(quad[2] - quad[3])
-    hA = np.linalg.norm(quad[3] - quad[0])
-    hB = np.linalg.norm(quad[2] - quad[1])
-    Wd = int(max(wA, wB))
-    Hd = int(max(hA, hB))
-
-    # 一旦その比で平面化
-    dst = np.array([[0, 0], [Wd - 1, 0], [Wd - 1, Hd - 1], [0, Hd - 1]], dtype="float32")
-    M = cv2.getPerspectiveTransform(quad, dst)
-    flat = cv2.warpPerspective(img_bgr, M, (Wd, Hd))
-
-    # 縦長へ（高さ>=幅）
-    if flat.shape[1] > flat.shape[0]:
-        flat = cv2.rotate(flat, cv2.ROTATE_90_CLOCKWISE)
-    _put_debug(flat, "06_flattened")
-    return flat
-
-
-def pad_to_a4(img_bgr, a4=(2480, 3508), margin_frac=0.04):
-    Aw, Ah = a4
-    h, w = img_bgr.shape[:2]
-    # 余白を少し確保してフィット
-    mw = int(Aw * margin_frac)
-    mh = int(Ah * margin_frac)
-    scale = min((Aw - 2 * mw) / w, (Ah - 2 * mh) / h)
-    nw, nh = int(w * scale), int(h * scale)
-    resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_CUBIC)
-    canvas = np.full((Ah, Aw, 3), 255, dtype=np.uint8)
-    x = (Aw - nw) // 2
-    y = (Ah - nh) // 2
-    canvas[y:y + nh, x:x + nw] = resized
-    _put_debug(canvas, "07_a4_canvas")
-    return canvas
-
-
-# ===== 抽出（高精度版） =====
-def extract_hanshi(image, output_size=(2480, 3508), debug_save=True):
-    """
-    書道の半紙を検出し透視変換で正面化する。
-    debug_save=True なら Dropbox /_debug に候補輪郭画像を保存。
-    """
-    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    orig = img_cv.copy()
+# ===== deskew （従来の minAreaRect ベース、転置は行わない） =====
+def deskew_image(pil_img):
+    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bw = 255 - bw
+    coords = np.column_stack(np.where(bw > 0))
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
+    if coords.size == 0:
+        print("  [deskew] 有効な座標なし → 補正スキップ")
+        return pil_img
 
-    img_area = img_cv.shape[0] * img_cv.shape[1]
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    print(f"  [deskew] 回転角度: {angle:.2f}°")
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 0.05 * img_area or area > 0.95 * img_area:
-            continue  # 小さすぎ・大きすぎは無視
+    (h, w) = img_cv.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(img_cv, M, (w, h),
+                             flags=cv2.INTER_CUBIC,
+                             borderMode=cv2.BORDER_REPLICATE)
 
-        approx = cv2.approxPolyDP(cnt, 0.02*cv2.arcLength(cnt, True), True)
-        if len(approx) != 4:
-            continue  # 四角形でないものは無視
+    # 転置回転は行わず、傾き補正のみ
+    return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
-        x, y, w, h = cv2.boundingRect(approx)
-        ratio = w / h
-        if not 0.9 <= ratio <= 1.1:
-            continue  # 半紙っぽくない形は無視
+# ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
+def trim_paper_hsv(image, sat_thresh=30, val_thresh=200, debug=False, file_name="img", page_idx=0):
+    """
+    HSV空間で白に近い領域をトリミングする関数（あなた提示の実装を拡張）。
+    - image: PIL Image
+    - sat_thresh: 彩度の閾値（S <= sat_thresh を白っぽいと判定）
+    - val_thresh: 明度の閾値（V >= val_thresh を白っぽいと判定）
+    - debug: Trueならマスク・切り取り位置を Dropbox/_debug に保存
+    """
+    img = image.convert("RGB")
+    hsv_img = img.convert("HSV")
+    np_hsv = np.array(hsv_img)
 
-        candidates.append((area, approx))
+    s = np_hsv[:, :, 1]
+    v = np_hsv[:, :, 2]
 
-    if not candidates:
-        print("  [hanshi] 半紙検出失敗 → 元画像を使用")
+    white_mask = (s <= sat_thresh) & (v >= val_thresh)
+    coords = np.argwhere(white_mask)
+
+    # デバッグ用：マスク画像を保存
+    if debug:
+        mask_vis = (white_mask.astype(np.uint8) * 255)
+        # mask を RGB 化して保存
+        mask_pil = Image.fromarray(mask_vis).convert("RGB")
+        save_debug_to_dropbox(mask_pil, f"debug_mask_{file_name}_{page_idx}.png")
+
+    if coords.size == 0:
+        print("  [trim] 白領域が見つからず → トリミングスキップ")
         return image
 
-    # 面積最大の候補を採用
-    candidates.sort(reverse=True, key=lambda x: x[0])
-    hanshi_contour = candidates[0][1]
+    y0, x0 = coords.min(axis=0)
+    y1, x1 = coords.max(axis=0) + 1
 
-    # DEBUG 保存
-    if debug_save:
-        debug_img = orig.copy()
-        cv2.drawContours(debug_img, [hanshi_contour], -1, (0,0,255), 3)
-        debug_pil = Image.fromarray(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB))
-        debug_bytes = io.BytesIO()
-        debug_pil.save(debug_bytes, format="PNG")
-        debug_bytes.seek(0)
-        debug_path = DROPBOX_SRC_FOLDER + "/_debug/hanshi_debug.png"
-        try:
-            dbx.files_upload(debug_bytes.read(), debug_path, mode=dropbox.files.WriteMode("overwrite"))
-            print(f"  [DEBUG] 半紙候補を {debug_path} に保存")
-        except Exception as e:
-            print(f"  [DEBUG_ERROR] 保存失敗: {e}")
+    # 境界クリップ（念のため）
+    w, h = img.size
+    x0 = max(0, min(x0, w - 1))
+    x1 = max(1, min(x1, w))
+    y0 = max(0, min(y0, h - 1))
+    y1 = max(1, min(y1, h))
 
-    # 頂点を (左上,右上,右下,左下) に並べ替え
-    pts = hanshi_contour.reshape(4, 2)
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
+    cropped = img.crop((x0, y0, x1, y1))
 
-    dst = np.array([
-        [0, 0],
-        [output_size[0]-1, 0],
-        [output_size[0]-1, output_size[1]-1],
-        [0, output_size[1]-1]], dtype="float32")
+    # デバッグ：切り出し位置を元画像に赤枠で描画して保存
+    if debug:
+        vis = np.array(img).copy()
+        cv2.rectangle(vis, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0), 4)  # 青枠（BGR）
+        vis_pil = Image.fromarray(vis)
+        save_debug_to_dropbox(vis_pil, f"debug_crop_{file_name}_{page_idx}.png")
 
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warp = cv2.warpPerspective(img_cv, M, output_size)
+    return cropped
 
-    print("  [hanshi] 半紙検出・透視変換成功")
-    return Image.fromarray(cv2.cvtColor(warp, cv2.COLOR_BGR2RGB))
+# ===== A4 に余白配置（歪ませずフィット） =====
+def fit_to_a4_padded(pil_img, a4=(2480, 3508)):
+    w, h = pil_img.size
+    scale = min(a4[0] / w, a4[1] / h)
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    resized = pil_img.resize(new_size, Image.LANCZOS)
+    canvas = Image.new("RGB", a4, (255, 255, 255))
+    off = ((a4[0] - new_size[0]) // 2, (a4[1] - new_size[1]) // 2)
+    canvas.paste(resized, off)
+    return canvas
 
-# ===== 画像補正（deskewは透視変換で置換） =====
-
+# ===== PDF→画像 =====
 def pdf_to_images(pdf_bytes):
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -302,9 +164,8 @@ def pdf_to_images(pdf_bytes):
         print(f"  [pdf] {i+1} ページ目を画像化 (size={pix.width}x{pix.height})")
     return images
 
-# ===== Dropboxファイル処理 =====
-
-def process_file(file_metadata):
+# ===== Dropbox 処理（メイン） =====
+def process_file(file_metadata, sat_thresh=30, val_thresh=200):
     file_path = file_metadata.path_lower
     file_name = os.path.basename(file_path)
     _, ext = os.path.splitext(file_path)
@@ -327,6 +188,7 @@ def process_file(file_metadata):
         data = res.content
         print(f"  [DL] ダウンロード完了 ({len(data)} bytes)")
 
+        # 画像読み込み
         if ext == ".pdf":
             print("  [LOAD] PDF → 画像変換開始")
             images = pdf_to_images(data)
@@ -342,34 +204,35 @@ def process_file(file_metadata):
         for idx, img in enumerate(images):
             print(f"  [PROC] {idx+1}枚目 補正開始")
 
-            # 初期縦横判定（横長なら縦に回転）
-            w0, h0 = img.size
-            if w0 > h0:
-                img = img.rotate(90, expand=True)
-                print("  [INIT] 横長→90°回転")
-            else:
-                print("  [INIT] 縦長→回転なし")
+            # 1) deskew（傾き補正）
+            img = deskew_image(img)
 
-            # 半紙抽出→A4配置
-            img = extract_hanshi(img)
+            # 2) trim（HSVベースの白領域トリミング） --- あなたの関数を採用
+            img_trimmed = trim_paper_hsv(img, sat_thresh=sat_thresh, val_thresh=val_thresh,
+                                         debug=DEBUG_SAVE, file_name=file_name, page_idx=idx)
 
-            # 最終安全回転（念のため縦長化）
-            w, h = img.size
+            # 3) 補正後の向き確認（縦長化）
+            w, h = img_trimmed.size
             if w > h:
-                img = img.rotate(90, expand=True)
-                print("  [SAFE] 最終縦長化 90°回転")
+                img_trimmed = img_trimmed.rotate(90, expand=True)
+                print("  [ORIENT] 横長検出 → 90°回転")
+            else:
+                print("  [ORIENT] 縦長検出 → 回転なし")
 
-            processed_images.append(img)
+            # 4) A4 に余白パディングで配置
+            a4_img = fit_to_a4_padded(img_trimmed, a4=(2480, 3508))
+            processed_images.append(a4_img)
+            print(f"  [PROC] 処理完了 サイズ({a4_img.width}x{a4_img.height})")
 
-        # PDF へ
+        # PDF にまとめてアップロード
         pdf_bytes = io.BytesIO()
         processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
         pdf_bytes.seek(0)
-
         dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(file_name)[0]}.pdf"
         dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
         print(f"[UPLOAD] {dest_pdf_path} にアップロード完了")
 
+        # 元ファイルを移動
         processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{file_name}"
         dbx.files_move_v2(file_path, processed_dest, autorename=True)
         print(f"[MOVE] 元ファイルを {processed_dest} に移動完了")
@@ -386,13 +249,12 @@ def process_file(file_metadata):
         print(f"[ERROR] {file_name} 処理中に例外発生: {e}")
 
 # ===== メイン =====
-
 def main():
     print("=== Dropbox フォルダ走査開始 ===")
     res = dbx.files_list_folder(DROPBOX_SRC_FOLDER)
     for entry in res.entries:
         if isinstance(entry, dropbox.files.FileMetadata):
-            process_file(entry)
+            process_file(entry, sat_thresh=30, val_thresh=200)
 
 if __name__ == "__main__":
     main()
