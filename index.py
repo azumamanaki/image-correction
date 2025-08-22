@@ -92,56 +92,59 @@ def deskew_image(pil_img):
     return Image.fromarray(cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB))
 
 # ===== あなたが示した高精度トリミング（HSVベース）を採用 =====
-def trim_paper_hsv(image, sat_thresh=30, val_thresh=200, debug=False, file_name="img", page_idx=0):
+def trim_paper_cv(pil_img, output_width=2400, debug=False, file_name="img", page_idx=0):
     """
-    HSV空間で白に近い領域をトリミングする関数（あなた提示の実装を拡張）。
-    - image: PIL Image
-    - sat_thresh: 彩度の閾値（S <= sat_thresh を白っぽいと判定）
-    - val_thresh: 明度の閾値（V >= val_thresh を白っぽいと判定）
-    - debug: Trueならマスク・切り取り位置を Dropbox/_debug に保存
+    OpenCV版半紙トリミング（文字・反射除去、輪郭ベース）
+    - pil_img: PIL Image
+    - output_width: 出力幅
+    - debug: Trueなら debug画像を保存
     """
-    img = image.convert("RGB")
-    hsv_img = img.convert("HSV")
-    np_hsv = np.array(hsv_img)
+    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    s = np_hsv[:, :, 1]
-    v = np_hsv[:, :, 2]
+    # 文字・反射除去
+    blur = cv2.GaussianBlur(gray, (15,15), 0)
+    _, mask = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((7,7), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
 
-    white_mask = (s <= sat_thresh) & (v >= val_thresh)
-    coords = np.argwhere(white_mask)
+    # 輪郭抽出
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        print("  [trim_cv] 半紙輪郭が検出できず → 元画像返却")
+        return pil_img
 
-    # デバッグ用：マスク画像を保存
+    # 最大輪郭を選択
+    largest_contour = max(contours, key=cv2.contourArea)
+    approx = cv2.approxPolyDP(largest_contour, 0.02*cv2.arcLength(largest_contour, True), True)
+
+    # 頂点を左上→右上→右下→左下
+    pts = approx.reshape(-1,2)
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+    ordered_pts = np.zeros((4,2), dtype=np.float32)
+    ordered_pts[0] = pts[np.argmin(s)]
+    ordered_pts[2] = pts[np.argmax(s)]
+    ordered_pts[1] = pts[np.argmin(diff)]
+    ordered_pts[3] = pts[np.argmax(diff)]
+
+    # 半紙比率
+    aspect_ratio = 334/244
+    output_height = round(output_width * aspect_ratio)
+    dst = np.float32([[0,0],[output_width-1,0],[output_width-1,output_height-1],[0,output_height-1]])
+
+    # 射影変換
+    M = cv2.getPerspectiveTransform(ordered_pts, dst)
+    warped = cv2.warpPerspective(img_cv, M, (output_width, output_height))
+
+    # デバッグ
     if debug:
-        mask_vis = (white_mask.astype(np.uint8) * 255)
-        # mask を RGB 化して保存
-        mask_pil = Image.fromarray(mask_vis).convert("RGB")
-        save_debug_to_dropbox(mask_pil, f"debug_mask_{file_name}_{page_idx}.png")
+        debug_img = img_cv.copy()
+        cv2.drawContours(debug_img, [approx], -1, (0,0,255), 3)
+        debug_pil = Image.fromarray(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB))
+        save_debug_to_dropbox(debug_pil, f"debug_hanshi_{file_name}_{page_idx}.png")
 
-    if coords.size == 0:
-        print("  [trim] 白領域が見つからず → トリミングスキップ")
-        return image
-
-    y0, x0 = coords.min(axis=0)
-    y1, x1 = coords.max(axis=0) + 1
-
-    # 境界クリップ（念のため）
-    w, h = img.size
-    x0 = max(0, min(x0, w - 1))
-    x1 = max(1, min(x1, w))
-    y0 = max(0, min(y0, h - 1))
-    y1 = max(1, min(y1, h))
-
-    cropped = img.crop((x0, y0, x1, y1))
-
-    # デバッグ：切り出し位置を元画像に赤枠で描画して保存
-    if debug:
-        vis = np.array(img).copy()
-        cv2.rectangle(vis, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0), 4)  # 青枠（BGR）
-        vis_pil = Image.fromarray(vis)
-        save_debug_to_dropbox(vis_pil, f"debug_crop_{file_name}_{page_idx}.png")
-
-    return cropped
-
+    return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 # ===== A4 に余白配置（歪ませずフィット） =====
 def fit_to_a4_padded(pil_img, a4=(2480, 3508)):
     w, h = pil_img.size
@@ -208,8 +211,8 @@ def process_file(file_metadata, sat_thresh=30, val_thresh=200):
             img = deskew_image(img)
 
             # 2) trim（HSVベースの白領域トリミング） --- あなたの関数を採用
-            img_trimmed = trim_paper_hsv(img, sat_thresh=sat_thresh, val_thresh=val_thresh,
-                                         debug=DEBUG_SAVE, file_name=file_name, page_idx=idx)
+            img_trimmed = trim_paper_cv(img, output_width=2400,
+                             debug=DEBUG_SAVE, file_name=file_name, page_idx=idx)
 
             # 3) 補正後の向き確認（縦長化）
             w, h = img_trimmed.size
