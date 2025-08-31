@@ -354,36 +354,25 @@ def detect_frame_or_compose(img: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]
         return None, info
 
 def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
-    """
-    I/Oなし。PIL.Image(RGB) を受け取り、トリミング済み PIL.Image(RGB) を返す。
-    - 黒縁除去 → 内側黒枠があれば優先して射影補正 → 無ければ紙マスクの最大成分で切り出し
-    - 保存・デバッグ出力は一切しない
-    """
-    # PIL -> BGR
     bgr0 = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-
-    # 1) 黒縁除去
     bgr1, _info_edge = auto_trim_black_edges(bgr0)
 
-    # 2) 内側枠の検出（a.pyの実装差異に対応：quad or (quad, info) を許容）
-    quad = None
-    ret = detect_frame_or_compose(bgr1)
-    if isinstance(ret, tuple) and len(ret) >= 1:
-        quad = ret[0] if (ret[0] is not None and np.asarray(ret[0]).size >= 8) else None
-        if quad is None and len(ret) >= 2 and ret[1] is not None:
-            # 実装によっては第2戻り値がquadのこともあるので保険
-            q2 = np.asarray(ret[1])
-            quad = q2 if q2.size >= 8 else None
-    else:
-        # 返り値がそのままquadの実装
-        q = np.asarray(ret) if ret is not None else None
-        quad = q if (q is not None and q.size >= 8) else None
+    # detect は (quad, info) で返るので素直にアンパック
+    quad, _info_frame = detect_frame_or_compose(bgr1)
 
     if quad is not None:
-        out = warp_by_quad(bgr1, np.asarray(quad).astype(np.float32), inner_ratio=FRAME_INNER_MARGIN_RATIO)
+        out = warp_by_quad(bgr1, quad.astype(np.float32), inner_ratio=FRAME_INNER_MARGIN_RATIO)
+
+        # ★ frame ルートでも仕上げ寄せ（process_one と同じ）
+        ratios = measure_edge_white_ratio(out, band_frac=0.02, thr=225)
+        ih, iw = out.shape[:2]
+        inset  = suggest_insets_from_ratios(ratios, iw, ih)
+        ty, by = inset["top"], inset["bottom"]
+        lx, rx = inset["left"], inset["right"]
+        if ty+by < ih-4 and lx+rx < iw-4:
+            out = out[ty:ih-by, lx:iw-rx]
+
     else:
-        # 3) 紙マスク → 最大連結成分で矩形切り出し
-        # build_paper_mask の戻りが mask だけか (mask, info) かの差異を吸収
         mret = build_paper_mask(bgr1)
         mask = mret[0] if (isinstance(mret, tuple) and len(mret) >= 1) else mret
 
@@ -396,12 +385,20 @@ def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
             x0 = max(0, x0 + SAFE_MARGIN_PX); y0 = max(0, y0 + SAFE_MARGIN_PX)
             x1 = min(W-1, x1 - SAFE_MARGIN_PX); y1 = min(H-1, y1 - SAFE_MARGIN_PX)
             out = bgr1[y0:y1+1, x0:x1+1]
+
+            # ★ こちらも仕上げ寄せ
+            ratios = measure_edge_white_ratio(out, band_frac=0.02, thr=225)
+            ih, iw = out.shape[:2]
+            inset  = suggest_insets_from_ratios(ratios, iw, ih)
+            ty, by = inset["top"], inset["bottom"]
+            lx, rx = inset["left"], inset["right"]
+            if ty+by < ih-4 and lx+rx < iw-4:
+                out = out[ty:ih-by, lx:iw-rx]
         else:
-            # どうしても無理なら黒縁除去のみ
             out = bgr1
 
-    # BGR -> PIL(RGB)
     return Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+
 
 # ===== A4 パディング =====
 def fit_to_a4_padded(pil_img, a4=(2480, 3508)):
