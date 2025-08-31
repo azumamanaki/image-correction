@@ -181,35 +181,161 @@ def _suggest_insets_from_ratios(r: dict, w: int, h: int) -> dict:
         return 0
     return {"top":g(r["top"],h),"bottom":g(r["bottom"],h),"left":g(r["left"],w),"right":g(r["right"],w)}
 
+def _polygon_mask(shape, pts: np.ndarray) -> np.ndarray:
+    """四角(pts: 4x2)のマスクを返す"""
+    m = np.zeros(shape[:2], np.uint8)
+    cv2.fillPoly(m, [pts.astype(np.int32)], 255)
+    return m
+
+def _score_frame_candidate_by_contrast(bgr: np.ndarray, box4: np.ndarray) -> Optional[float]:
+    """
+    四角候補に対して、枠の“黒さ”と内側“白さ”を測ってスコア化。
+    戻り値: スコア（小さいとNG）/ None=不採用
+    """
+    H, W = bgr.shape[:2]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    box = _order_quad(box4.copy())
+    mask = _polygon_mask(bgr.shape, box)
+
+    # 画像サイズに応じた枠幅
+    t = max(2, int(round(0.005 * min(H, W))))
+    t_in = max(1, t)          # 内側に1段
+    t_in_more = max(2, 3*t)   # さらに内側（本体用）
+
+    ker_t     = cv2.getStructuringElement(cv2.MORPH_RECT, (t, t))
+    ker_tmore = cv2.getStructuringElement(cv2.MORPH_RECT, (t_in_more, t_in_more))
+
+    # “枠の内側リング”: mask - erode(mask, t)  …内側に細い帯
+    mask_erode = cv2.erode(mask, ker_t)
+    ring_in = cv2.subtract(mask, mask_erode)
+
+    # “本体の内側”: erode(mask, 3*t)  …枠から十分離れた内側
+    mask_core = cv2.erode(mask, ker_tmore)
+
+    if mask_core.sum() == 0 or ring_in.sum() == 0:
+        return None
+
+    # 明るさ/白比率
+    core_vals = gray[mask_core > 0]
+    ring_vals = gray[ring_in > 0]
+    core_mean = float(core_vals.mean()) if core_vals.size else 0.0
+    ring_mean = float(ring_vals.mean()) if ring_vals.size else 255.0
+
+    core_white_ratio = float((core_vals >= 210).mean()) if core_vals.size else 0.0
+    border_contrast  = (core_mean - ring_mean) / 255.0  # 内側が枠よりどれだけ明るいか
+
+    # 形状・位置の基本スコア
+    rect = cv2.minAreaRect(box.astype(np.float32))
+    (cx, cy), (w, h), _ = rect
+    if w <= 1 or h <= 1:
+        return None
+    r = max(w, h) / min(w, h)
+    aspect_pen = abs(r - TARGET_HW)
+    if aspect_pen > ASPECT_TOL:
+        return None
+
+    area_norm = (w*h) / float(W*H)
+    dc = np.hypot(cx - W/2, cy - H/2) / max(W, H)
+
+    # しきい値（最低限の確証）
+    if border_contrast < 0.05 or core_white_ratio < 0.55:
+        return None
+
+    # 総合スコア：大きい/白い/枠コントラスト強い/中心寄り/比率近い を好む
+    score = (
+        area_norm * 1.0
+        + border_contrast * 0.8
+        + core_white_ratio * 0.5
+        - aspect_pen * 0.6
+        - dc * 0.2
+    )
+    return score
+
+def _detect_inner_frame_strict(bgr: np.ndarray) -> Optional[np.ndarray]:
+    """黒い内枠を“コントラスト確証付き”で検出し、最良の四角を返す"""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5,5), 0)
+    edges = cv2.Canny(gray, 60, 180)
+    edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    for cnt in contours:
+        if cv2.contourArea(cnt) < FRAME_MIN_AR:
+            continue
+        # まずは最小外接長方形（枠は概ね長方形）
+        rect = cv2.minAreaRect(cnt)
+        box  = cv2.boxPoints(rect).astype(np.float32)
+
+        # スコア化（枠の黒さ/内側白さ/面積/中心/比率）
+        s = _score_frame_candidate_by_contrast(bgr, box)
+        if s is None:
+            continue
+        if (best is None) or (s > best[0]):
+            best = (s, box)
+
+    return None if best is None else best[1]
+
+def _refine_to_paper_after_warp(bgr: np.ndarray) -> np.ndarray:
+    """ワープ後に、紙マスクで“紙だけ”に安全に絞り直す最終仕上げ"""
+    mask = _build_paper_mask(bgr)
+    lcc, area_ratio = _largest_cc(mask)
+    if area_ratio <= 0.0 or lcc.max() == 0:
+        return bgr
+    ys, xs = np.where(lcc > 0)
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    H, W = bgr.shape[:2]
+    x0 = max(0, x0 + SAFE_MARGIN_PX); y0 = max(0, y0 + SAFE_MARGIN_PX)
+    x1 = min(W-1, x1 - SAFE_MARGIN_PX); y1 = min(H-1, y1 - SAFE_MARGIN_PX)
+    if x1 > x0+4 and y1 > y0+4:
+        return bgr[y0:y1+1, x0:x1+1]
+    return bgr
+
 def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
-    """保存・デバッグ一切なし。PIL→PILで返す。"""
+    """
+    a.py の挙動に寄せた I/Oなし版:
+      黒縁除去 → “内枠の黒/内側の白”で確証した四角を優先ワープ
+      → 見つからない時は紙マスクで矩形切り出し
+      → ワープ後に“紙だけ”へ最終しぼり → 白さで控えめインセット
+    """
+    # 0) 入力正規化
     bgr0 = _pil_to_bgr(pil_img)
+
+    # 1) 黒縁の自動トリム
     bgr1 = _auto_trim_black_edges(bgr0)
-    quad = _detect_inner_frame(bgr1)
+
+    # 2) 枠の厳密検出（コントラスト確証つき）
+    quad = _detect_inner_frame_strict(bgr1)
     if quad is not None:
         out = _warp_by_quad(bgr1, quad, inner_ratio=FRAME_INNER_MARGIN_RATIO)
+        out = _refine_to_paper_after_warp(out)
     else:
+        # 3) フォールバック：紙マスク→最大連結成分で切り出し
         mask = _build_paper_mask(bgr1)
         lcc, area_ratio = _largest_cc(mask)
-        if area_ratio >= MIN_AREA_RATIO and lcc.max()>0:
-            ys,xs = np.where(lcc>0)
-            y0,y1 = int(ys.min()), int(ys.max())
-            x0,x1 = int(xs.min()), int(xs.max())
-            H,W = bgr1.shape[:2]
-            x0 = max(0, x0+SAFE_MARGIN_PX); y0 = max(0, y0+SAFE_MARGIN_PX)
-            x1 = min(W-1, x1-SAFE_MARGIN_PX); y1 = min(H-1, y1-SAFE_MARGIN_PX)
+        if area_ratio >= MIN_AREA_RATIO and lcc.max() > 0:
+            ys, xs = np.where(lcc > 0)
+            y0, y1 = int(ys.min()), int(ys.max())
+            x0, x1 = int(xs.min()), int(xs.max())
+            H, W = bgr1.shape[:2]
+            x0 = max(0, x0 + SAFE_MARGIN_PX); y0 = max(0, y0 + SAFE_MARGIN_PX)
+            x1 = min(W-1, x1 - SAFE_MARGIN_PX); y1 = min(H-1, y1 - SAFE_MARGIN_PX)
             out = bgr1[y0:y1+1, x0:x1+1]
         else:
             out = bgr1
-    # 仕上げの控えめインセット
-    h,w = out.shape[:2]
+
+    # 4) 仕上げ：四辺の白さで控えめインセット
+    h, w = out.shape[:2]
     ratios = _measure_edge_white_ratios(out, EDGE_BAND_FRAC, EDGE_WHITE_THR)
     inset  = _suggest_insets_from_ratios(ratios, w, h)
-    ty,by,lx,rx = inset["top"], inset["bottom"], inset["left"], inset["right"]
-    if ty+by < h-4 and lx+rx < w-4:
+    ty, by, lx, rx = inset["top"], inset["bottom"], inset["left"], inset["right"]
+    if ty + by < h - 4 and lx + rx < w - 4:
         out = out[ty:h-by, lx:w-rx]
+
     return _bgr_to_pil(out)
-# ==== ここまで貼り付け ====
+
 # ===== A4 パディング =====
 def fit_to_a4_padded(pil_img, a4=(2480, 3508)):
     w, h = pil_img.size
