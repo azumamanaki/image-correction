@@ -400,16 +400,15 @@ def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
 
 
-# ===== A4 パディング =====
-def fit_to_a4_padded(pil_img, a4=(2480, 3508)):
-    w, h = pil_img.size
-    scale = min(a4[0] / w, a4[1] / h)
-    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-    resized = pil_img.resize(new_size, Image.LANCZOS)
-    canvas = Image.new("RGB", a4, (255,255,255))
-    off = ((a4[0]-new_size[0])//2, (a4[1]-new_size[1])//2)
-    canvas.paste(resized, off)
-    return canvas
+# ===== A4 リサイズ（余白なし） =====
+def fit_to_a4_resized(pil_img, a4=(2480, 3508)):
+    """
+    入力画像を拡大縮小して A4 サイズに変換する。
+    - アスペクト比は維持せず、強制的に a4 サイズに合わせる
+    - 余白は出ない
+    """
+    resized = pil_img.resize(a4, Image.LANCZOS)
+    return resized
 
 # ===== PDF→画像 =====
 def pdf_to_images(pdf_bytes):
@@ -462,7 +461,7 @@ def process_file(file_metadata):
                 img_trimmed = img_trimmed.rotate(90, expand=True)
 
             # A4 パディング
-            a4_img = fit_to_a4_padded(img_trimmed)
+            a4_img = fit_to_a4_resized(img_trimmed)
             processed_images.append(a4_img)
 
         # PDF にまとめてアップロード
