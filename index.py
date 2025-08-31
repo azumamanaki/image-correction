@@ -386,11 +386,11 @@ def process_file(file_metadata):
             # processed_images.append(a4_img)
 
         # PDF にまとめてアップロード
-        pdf_bytes = io.BytesIO()
-        processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
-        pdf_bytes.seek(0)
-        dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(file_name)[0]}.pdf"
-        dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
+        # pdf_bytes = io.BytesIO()
+        # processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
+        # pdf_bytes.seek(0)
+        # dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(file_name)[0]}.pdf"
+        # dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
 
         # 元ファイルを補正済フォルダへ移動
         processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{file_name}"
