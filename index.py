@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image, ImageOps
 import cv2
 import fitz  # PyMuPDF
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Optional
 from pathlib import Path
 
 
@@ -126,10 +126,6 @@ def _score_rect(cnt: np.ndarray, shape: Tuple[int,int]) -> Optional[Tuple[float,
     area = w*h
     score = (area*1e-4) - (pen*2.0) - (dc*0.5)
     return (score, box)
-
-from typing import Tuple, Optional
-import numpy as np, cv2
-from PIL import Image
 
 def _detect_inner_frame(bgr: np.ndarray) -> Optional[np.ndarray]:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
