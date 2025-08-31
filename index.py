@@ -17,6 +17,7 @@ DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
 DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
 
 DROPBOX_SRC_FOLDER = "/おうち書道/共有データ/【受講生】/【添削用　作品】"
+DROPBOX_INPUT_FOLDER    = DROPBOX_SRC_FOLDER + "/提出画像"
 DROPBOX_PRINT_FOLDER = DROPBOX_SRC_FOLDER + "/添削用印刷未"
 DROPBOX_PROCESSED_FOLDER = DROPBOX_SRC_FOLDER + "/補正済元画像"
 DROPBOX_FAILED_FOLDER = DROPBOX_SRC_FOLDER + "/補正失敗"
@@ -487,7 +488,7 @@ def process_file(file_metadata):
 
 # ===== メイン =====
 def main():
-    res = dbx.files_list_folder(DROPBOX_SRC_FOLDER)
+    res = dbx.files_list_folder(DROPBOX_INPUT_FOLDER)
     for entry in res.entries:
         if isinstance(entry, dropbox.files.FileMetadata):
             process_file(entry)
