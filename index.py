@@ -376,14 +376,14 @@ def process_file(file_metadata):
             # 高精度トリミング
             img_trimmed = trim_shodo_paper(img)
 
-            # 向き補正
-            w, h = img_trimmed.size
-            if w > h:
-                img_trimmed = img_trimmed.rotate(90, expand=True)
+            # # 向き補正
+            # w, h = img_trimmed.size
+            # if w > h:
+            #     img_trimmed = img_trimmed.rotate(90, expand=True)
 
-            # A4 パディング
-            a4_img = fit_to_a4_padded(img_trimmed)
-            processed_images.append(a4_img)
+            # # A4 パディング
+            # a4_img = fit_to_a4_padded(img_trimmed)
+            # processed_images.append(a4_img)
 
         # PDF にまとめてアップロード
         pdf_bytes = io.BytesIO()
