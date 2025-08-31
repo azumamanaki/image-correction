@@ -7,8 +7,9 @@ import numpy as np
 from PIL import Image, ImageOps
 import cv2
 import fitz  # PyMuPDF
-from typing import Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List
 from pathlib import Path
+
 
 
 # ===== 設定（必須環境変数） =====
@@ -24,6 +25,7 @@ BUCKETS = [
         "processed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/補正済元画像",  # /補正済元画像
         "failed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/補正失敗",        # /補正失敗
         "debug": "/おうち書道/共有データ/【受講生】/【添削用　作品】/_debug",          # /_debug
+        "target_px": (2480, 3508),
     },
     {
         "name": "清書用-硬筆",
@@ -32,6 +34,7 @@ BUCKETS = [
         "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/補正済元画像",
         "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/補正失敗",
         "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/_debug",
+        "target_px": (1496, 2083),
     },
     {
         "name": "清書用-毛筆",
@@ -40,12 +43,58 @@ BUCKETS = [
         "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/補正済元画像",
         "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/補正失敗",
         "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/_debug",
+        "target_px": (2870, 3937),
     },
 ]
 
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
 DEBUG_SAVE = True  # debug画像をDropbox/_debug に保存
+
+# ===== 外周の黒帯除去 =====
+DARK_RATIO_EDGE = 0.40
+DARK_THRESH     = 90
+SAFE_MARGIN_PX  = 2
+
+# ===== 紙マスク =====
+HSV_V_MIN  = 150
+HSV_S_MAX  = 60
+ADAPT_BLOCK = 51
+ADAPT_C     = 10
+K_CLOSE     = (9, 9)
+K_OPEN      = (5, 5)
+MIN_AREA_RATIO = 0.20
+
+# ===== 内側の黒枠（外枠）検出：コラム誤検出を抑制 =====
+# 反転適応二値化（黒線→白）
+ADAPT_BLOCK_INV = 31
+ADAPT_C_INV     = 10
+FRAME_CONNECT_K = (3, 3)    # 黒線の連結
+
+# 候補矩形の面積・幅・アスペクトのガード
+FRAME_MIN_ARATIO   = 0.15   # 面積比の下限（全体の15%以上）
+FRAME_MAX_ARATIO   = 0.95   # 上限
+FRAME_MIN_W_FRAC   = 0.35   # 画像幅に対する最小幅 35%（細コラム排除）
+FRAME_PAPER_AR_MIN = 1.05   # 縦/横（紙っぽい範囲）
+FRAME_PAPER_AR_MAX = 1.80
+
+# “細いコラム”の定義（縦長過ぎる候補）
+COLUMN_AR_MIN = 3.0         # 縦/横が3以上ならコラム候補
+COLUMN_MIN_H_FRAC = 0.6     # 画像高さの60%以上の高さがある細長いもの
+
+# スコアリング
+TARGET_ASPECT  = 1.38       # 半紙/硬筆の事前分布
+ASPECT_TOL     = 0.60       # 許容（±0.60）
+FRAME_CENTER_BIAS = 0.0005  # 中心に近いほど微優先
+FRAME_INSIDE_MEAN_MIN = 160 # 内側の明るさ（紙想定）
+
+# 外枠が見つかったら内側に少し寄せる（黒線を避ける）
+FRAME_INNER_MARGIN_RATIO = 0.01
+
+# 既存の定数名に合わせてください。無ければ下の2つは任意で定義。
+FRAME_INNER_MARGIN_RATIO = globals().get("FRAME_INNER_MARGIN_RATIO", 0.01)
+MIN_AREA_RATIO = globals().get("MIN_AREA_RATIO", 0.02)
+SAFE_MARGIN_PX = globals().get("SAFE_MARGIN_PX", 2)
 
 # ===== Dropbox 初期化 =====
 def get_access_token():
@@ -99,61 +148,6 @@ def ensure_dropbox_folders(dbx, paths: dict):
 - 出力: complete/
 - デバッグ: debug/ に各段階の画像と JSON
 """
-
-from pathlib import Path
-import cv2
-import numpy as np
-from typing import Tuple, Dict, Any, List
-from typing import Optional, Tuple
-import numpy as np
-import cv2
-from PIL import Image
-
-
-# ===== 外周の黒帯除去 =====
-DARK_RATIO_EDGE = 0.40
-DARK_THRESH     = 90
-SAFE_MARGIN_PX  = 2
-
-# ===== 紙マスク =====
-HSV_V_MIN  = 150
-HSV_S_MAX  = 60
-ADAPT_BLOCK = 51
-ADAPT_C     = 10
-K_CLOSE     = (9, 9)
-K_OPEN      = (5, 5)
-MIN_AREA_RATIO = 0.20
-
-# ===== 内側の黒枠（外枠）検出：コラム誤検出を抑制 =====
-# 反転適応二値化（黒線→白）
-ADAPT_BLOCK_INV = 31
-ADAPT_C_INV     = 10
-FRAME_CONNECT_K = (3, 3)    # 黒線の連結
-
-# 候補矩形の面積・幅・アスペクトのガード
-FRAME_MIN_ARATIO   = 0.15   # 面積比の下限（全体の15%以上）
-FRAME_MAX_ARATIO   = 0.95   # 上限
-FRAME_MIN_W_FRAC   = 0.35   # 画像幅に対する最小幅 35%（細コラム排除）
-FRAME_PAPER_AR_MIN = 1.05   # 縦/横（紙っぽい範囲）
-FRAME_PAPER_AR_MAX = 1.80
-
-# “細いコラム”の定義（縦長過ぎる候補）
-COLUMN_AR_MIN = 3.0         # 縦/横が3以上ならコラム候補
-COLUMN_MIN_H_FRAC = 0.6     # 画像高さの60%以上の高さがある細長いもの
-
-# スコアリング
-TARGET_ASPECT  = 1.38       # 半紙/硬筆の事前分布
-ASPECT_TOL     = 0.60       # 許容（±0.60）
-FRAME_CENTER_BIAS = 0.0005  # 中心に近いほど微優先
-FRAME_INSIDE_MEAN_MIN = 160 # 内側の明るさ（紙想定）
-
-# 外枠が見つかったら内側に少し寄せる（黒線を避ける）
-FRAME_INNER_MARGIN_RATIO = 0.01
-
-# 既存の定数名に合わせてください。無ければ下の2つは任意で定義。
-FRAME_INNER_MARGIN_RATIO = globals().get("FRAME_INNER_MARGIN_RATIO", 0.01)
-MIN_AREA_RATIO = globals().get("MIN_AREA_RATIO", 0.02)
-SAFE_MARGIN_PX = globals().get("SAFE_MARGIN_PX", 2)
 
 
 def auto_trim_black_edges(img: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -433,15 +427,12 @@ def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
 
 
-# ===== A4 リサイズ（余白なし） =====
-def fit_to_a4_resized(pil_img, a4=(2480, 3508)):
+# ===== リサイズ（余白なし） =====
+def resize_to_target(pil_img: Image.Image, target_px: tuple[int,int]) -> Image.Image:
     """
-    入力画像を拡大縮小して A4 サイズに変換する。
-    - アスペクト比は維持せず、強制的に a4 サイズに合わせる
-    - 余白は出ない
+    画像を強制的に target_px サイズにリサイズする（余白なし）
     """
-    resized = pil_img.resize(a4, Image.LANCZOS)
-    return resized
+    return pil_img.resize(target_px, Image.LANCZOS)
 
 # ===== PDF→画像 =====
 def pdf_to_images(pdf_bytes):
@@ -499,8 +490,7 @@ def process_file(file_metadata, paths: dict):
                 trimmed = trimmed.rotate(90, expand=True)
 
             # A4 化（余白なし or 余白あり、どちらか）
-            a4_img = fit_to_a4_resized(trimmed)   # 余白なしでA4ちょうど
-            # a4_img = fit_to_a4_padded(trimmed)  # 余白ありでA4に収める
+            a4_img = resize_to_target(trimmed, paths["target_px"])
 
             processed_images.append(a4_img)
 
