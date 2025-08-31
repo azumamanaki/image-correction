@@ -16,12 +16,32 @@ DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
 DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
 DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
 
-DROPBOX_SRC_FOLDER = "/おうち書道/共有データ/【受講生】/【添削用　作品】"
-DROPBOX_INPUT_FOLDER    = DROPBOX_SRC_FOLDER + "/提出画像"
-DROPBOX_PRINT_FOLDER = DROPBOX_SRC_FOLDER + "/添削用印刷未"
-DROPBOX_PROCESSED_FOLDER = DROPBOX_SRC_FOLDER + "/補正済元画像"
-DROPBOX_FAILED_FOLDER = DROPBOX_SRC_FOLDER + "/補正失敗"
-DROPBOX_DEBUG_FOLDER = DROPBOX_SRC_FOLDER + "/_debug"
+BUCKETS = [
+    {
+        "name": "添削用",
+        "input": "/おうち書道/共有データ/【受講生】/【添削用　作品】/提出画像",  # /添削用 作品/提出画像
+        "print": "/おうち書道/共有データ/【受講生】/【添削用　作品】/清書用印刷未",  # /添削用印刷未
+        "processed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/補正済元画像",  # /補正済元画像
+        "failed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/補正失敗",        # /補正失敗
+        "debug": "/おうち書道/共有データ/【受講生】/【添削用　作品】/_debug",          # /_debug
+    },
+    {
+        "name": "清書用-硬筆",
+        "input": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/提出画像",
+        "print": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/清書用印刷未",
+        "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/補正済元画像",
+        "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/補正失敗",
+        "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/_debug",
+    },
+    {
+        "name": "清書用-毛筆",
+        "input": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/提出画像",
+        "print": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/清書用印刷未",
+        "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/補正済元画像",
+        "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/補正失敗",
+        "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/_debug",
+    },
+]
 
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
 
@@ -42,18 +62,30 @@ def get_access_token():
 dbx = dropbox.Dropbox(get_access_token())
 
 # ===== デバッグ保存 =====
-def save_debug_to_dropbox(pil_img, name):
+def save_debug_to_dropbox(pil_img, name: str, debug_dir: str, *, overwrite: bool = True):
+    """現在のバケットの debug_dir に PNG で保存する"""
     if not DEBUG_SAVE:
         return
     try:
         bio = io.BytesIO()
         pil_img.save(bio, format="PNG")
         bio.seek(0)
-        path = f"{DROPBOX_DEBUG_FOLDER}/{name}"
-        dbx.files_upload(bio.read(), path, mode=dropbox.files.WriteMode("overwrite"))
+        mode = dropbox.files.WriteMode("overwrite") if overwrite else dropbox.files.WriteMode("add")
+        path = f"{debug_dir}/{name}"
+        dbx.files_upload(bio.read(), path, mode=mode)
         print(f"  [DEBUG_SAVE] {path} に保存")
     except Exception as e:
         print(f"  [DEBUG_SAVE_ERROR] {e}")
+
+
+
+def ensure_dropbox_folders(dbx, paths: dict):
+    for k in ("print","processed","failed","debug"):
+        try:
+            dbx.files_create_folder_v2(paths[k])
+        except Exception:
+            # 既に存在すればエラーになるので無視
+            pass
 
 # ===== 高精度トリミング =====
 # -*- coding: utf-8 -*-
@@ -422,7 +454,9 @@ def pdf_to_images(pdf_bytes):
     return images
 
 # ===== Dropbox ファイル処理 =====
-def process_file(file_metadata):
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".pdf"}
+
+def process_file(file_metadata, paths: dict):
     file_path = file_metadata.path_lower
     file_name = os.path.basename(file_path)
     _, ext = os.path.splitext(file_path)
@@ -431,67 +465,88 @@ def process_file(file_metadata):
     print(f"\n=== 処理開始: {file_name} ===")
 
     if ext not in SUPPORTED_EXTS:
-        fail_dest = f"{DROPBOX_FAILED_FOLDER}/{file_name}"
+        fail_dest = f"{paths['failed']}/{file_name}"
         try:
             dbx.files_move_v2(file_path, fail_dest, autorename=True)
-            print(f"[SKIP] 非対応拡張子 → {fail_dest} に移動")
+            print(f"[SKIP] 非対応拡張子 → {fail_dest}")
         except Exception as e:
-            print(f"[ERROR] {e}")
+            print(f"[ERROR] move(non-supported): {e}")
         return
 
     try:
+        # 1) ダウンロード
         _, res = dbx.files_download(file_path)
         data = res.content
 
+        # 2) 画像化
         if ext == ".pdf":
-            images = pdf_to_images(data)
+            images = pdf_to_images(data)  # あなたの既存 or safe版
+            if not images:
+                raise ValueError("PDFページが0件")
         else:
             img = Image.open(io.BytesIO(data))
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
+            img = ImageOps.exif_transpose(img).convert("RGB")
             images = [img]
 
+        # 3) ページ処理
         processed_images = []
-        for idx, img in enumerate(images):
-            # 高精度トリミング
-            img_trimmed = trim_shodo_paper(img)
+        for idx, pil_img in enumerate(images):
+            trimmed = trim_shodo_paper(pil_img)  # ← I/Oなしのトリミング関数
 
-            # 向き補正
-            w, h = img_trimmed.size
+            # 縦長に統一（必要なら）
+            w, h = trimmed.size
             if w > h:
-                img_trimmed = img_trimmed.rotate(90, expand=True)
+                trimmed = trimmed.rotate(90, expand=True)
 
-            # A4 パディング
-            a4_img = fit_to_a4_resized(img_trimmed)
+            # A4 化（余白なし or 余白あり、どちらか）
+            a4_img = fit_to_a4_resized(trimmed)   # 余白なしでA4ちょうど
+            # a4_img = fit_to_a4_padded(trimmed)  # 余白ありでA4に収める
+
             processed_images.append(a4_img)
 
-        # PDF にまとめてアップロード
+        # 4) PDF に束ねてアップロード
         pdf_bytes = io.BytesIO()
-        processed_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=processed_images[1:])
+        processed_images[0].save(pdf_bytes, format="PDF", save_all=True,
+                                 append_images=processed_images[1:])
         pdf_bytes.seek(0)
-        dest_pdf_path = f"{DROPBOX_PRINT_FOLDER}/{os.path.splitext(file_name)[0]}.pdf"
-        dbx.files_upload(pdf_bytes.read(), dest_pdf_path, mode=dropbox.files.WriteMode("overwrite"))
+        dest_pdf_path = f"{paths['print']}/{os.path.splitext(file_name)[0]}.pdf"
+        dbx.files_upload(pdf_bytes.read(), dest_pdf_path,
+                         mode=dropbox.files.WriteMode("overwrite"))
 
-        # 元ファイルを補正済フォルダへ移動
-        processed_dest = f"{DROPBOX_PROCESSED_FOLDER}/{file_name}"
+        # 5) 元ファイルを processed へ移動
+        processed_dest = f"{paths['processed']}/{file_name}"
         dbx.files_move_v2(file_path, processed_dest, autorename=True)
 
         print(f"✅ 成功: {file_name}")
 
     except Exception as e:
-        fail_dest = f"{DROPBOX_FAILED_FOLDER}/{file_name}"
+        # 失敗時に failed へ
+        fail_dest = f"{paths['failed']}/{file_name}"
         try:
             dbx.files_move_v2(file_path, fail_dest, autorename=True)
-        except:
-            pass
+        except Exception as me:
+            print(f"[ERROR] move(failed) も失敗: {me}")
         print(f"❌ 失敗: {file_name} ({e})")
 
 # ===== メイン =====
 def main():
-    res = dbx.files_list_folder(DROPBOX_INPUT_FOLDER)
-    for entry in res.entries:
-        if isinstance(entry, dropbox.files.FileMetadata):
-            process_file(entry)
+    for bucket in BUCKETS:
+        print(f"\n=== バケット開始: {bucket['name']} ===")
+        ensure_dropbox_folders(dbx, bucket)  # 任意
+
+        # 提出画像フォルダ直下のみ（サブフォルダも対象にするなら recursive=True）
+        res = dbx.files_list_folder(bucket["input"])
+        entries = list(res.entries)
+        while res.has_more:
+            res = dbx.files_list_folder_continue(res.cursor)
+            entries.extend(res.entries)
+
+        count = 0
+        for entry in entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                process_file(entry, bucket)
+                count += 1
+        print(f"[INFO] {bucket['name']}: {count} 件処理")
 
 if __name__ == "__main__":
     main()
