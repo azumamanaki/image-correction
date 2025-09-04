@@ -2,7 +2,7 @@ name: Run Image Correction
 
 on:
   schedule:
-    - cron: "0 * * * *"   # 毎時0分 (UTC) → index.py
+    - cron: "7 */2 * * *"   # # index.py 2時間おき(UTC)
     - cron: "5 0 1 * *"   # 毎月1日 00:05 (UTC) ≒ JST 09:05 → 月次メンテ
   workflow_dispatch:
 

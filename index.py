@@ -9,6 +9,7 @@ import cv2
 import fitz  # PyMuPDF
 from typing import Optional, Tuple, Dict, Any, List
 from pathlib import Path
+import datetime as dt
 
 
 
@@ -430,7 +431,7 @@ def process_file(file_metadata, paths: dict):
     入力: PDF/JPG/PNG
     処理: 画像化 → トリム → （必要なら回転）→ A4等のターゲット解像度に整形
     出力: PNGで paths['print'] へ保存（複数ページは _p1.png, _p2.png ...）
-    その後、元ファイルを paths['processed'] へ移動
+    その後、元ファイルを paths['processed']/<YYYY-M>/ へ移動
     """
     file_path = file_metadata.path_lower
     file_name = os.path.basename(file_path)
@@ -439,7 +440,7 @@ def process_file(file_metadata, paths: dict):
 
     print(f"\n=== 処理開始: {file_name} ===")
 
-    if ext not in SUPPORTED_EXTS:  # 例: {".pdf", ".jpg", ".jpeg", ".png"}
+    if ext not in SUPPORTED_EXTS:
         fail_dest = f"{paths['failed']}/{file_name}"
         try:
             dbx.files_move_v2(file_path, fail_dest, autorename=True)
@@ -453,7 +454,7 @@ def process_file(file_metadata, paths: dict):
         _, res = dbx.files_download(file_path)
         data = res.content
 
-        # 2) 画像化（PDFは全ページ、画像は1枚）
+        # 2) 画像化
         if ext == ".pdf":
             images = pdf_to_images(data)  # bytes -> [PIL.Image,...]
             if not images:
@@ -463,28 +464,26 @@ def process_file(file_metadata, paths: dict):
             img = ImageOps.exif_transpose(img).convert("RGB")
             images = [img]
 
-        # 3) ページ単位の処理（トリム→縦長統一→ターゲット解像度）
+        # 3) ページ処理
         processed_images = []
         for idx, pil_img in enumerate(images, start=1):
-            trimmed = trim_shodo_paper(pil_img)  # あなたのトリミング関数（I/Oなし）
+            trimmed = trim_shodo_paper(pil_img)
 
-            # 縦長に統一（横長なら90度回転）
+            # 縦長に統一
             w, h = trimmed.size
             if w > h:
                 trimmed = trimmed.rotate(90, expand=True)
 
-            # 目的サイズへ（余白ポリシーは resize_to_target 内で）
             a4_img = resize_to_target(trimmed, paths["target_px"])
             processed_images.append((idx, a4_img))
 
-        # 4) PNGでアップロード（束ねずページ毎）
+        # 4) PNGでアップロード
         uploaded = []
         for idx, out_img in processed_images:
             out_name = stem if len(processed_images) == 1 else f"{stem}_p{idx}"
             out_png_path = f"{paths['print']}/{out_name}.png"
 
             buf = io.BytesIO()
-            # 低圧縮＆可逆（品質優先）: optimize=True, compress_level=1 など好みで
             out_img.save(buf, format="PNG", optimize=True, compress_level=1)
             buf.seek(0)
 
@@ -494,8 +493,18 @@ def process_file(file_metadata, paths: dict):
 
         print(f"✅ PNG保存: {len(uploaded)}ファイル -> print")
 
-        # 5) 元ファイルを processed へ移動
-        processed_dest = f"{paths['processed']}/{file_name}"
+        # 5) 元ファイルを processed/<YYYY-M>/ へ移動（フォルダが無ければ作成）
+        now = dt.datetime.now()
+        ym_bucket = f"{now.year}-{now.month}"   # 例: 2025-9
+        processed_month_dir = f"{paths['processed']}/{ym_bucket}"
+
+        # フォルダ作成（存在してもOK）
+        try:
+            dbx.files_create_folder_v2(processed_month_dir)
+        except Exception:
+            pass
+
+        processed_dest = f"{processed_month_dir}/{file_name}"
         dbx.files_move_v2(file_path, processed_dest, autorename=True)
         print(f"→ processed へ移動: {processed_dest}")
 
