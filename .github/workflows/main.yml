@@ -2,29 +2,56 @@ name: Run Image Correction
 
 on:
   schedule:
-    - cron: "0 * * * *"  # 毎時0分に実行
-  workflow_dispatch:      # 手動トリガーも可能
+    - cron: "0 * * * *"   # 毎時0分 (UTC)
+  workflow_dispatch:
+
+# 実行中のものがあれば新しい実行をキャンセル（衝突防止）
+concurrency:
+  group: image_correction
+  cancel-in-progress: true
 
 jobs:
   image_correction:
     runs-on: ubuntu-latest
+    timeout-minutes: 25  # 無限ハング防止
+
+    permissions:
+      contents: read
 
     env:
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
       DROPBOX_CLIENT_ID: ${{ secrets.DROPBOX_CLIENT_ID }}
       DROPBOX_CLIENT_SECRET: ${{ secrets.DROPBOX_CLIENT_SECRET }}
+      PYTHONUNBUFFERED: "1"   # ログをバッファせず即時出力
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"            # ← pip キャッシュを有効化
+          cache-dependency-path: "requirements.txt"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip wheel
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run the correction script
-        run: python index.py
+      - name: Run the correction script (with retry)
+        id: run_index
+        run: |
+          set -e
+          python index.py 2>&1 | tee run.log
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-and-logs
+          path: |
+            run.log
+            debug/**

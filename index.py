@@ -24,7 +24,6 @@ BUCKETS = [
         "print": "/おうち書道/共有データ/【受講生】/【添削用　作品】/添削用印刷未",  # /添削用印刷未
         "processed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/補正済元画像",  # /補正済元画像
         "failed": "/おうち書道/共有データ/【受講生】/【添削用　作品】/処理失敗",        # /処理失敗
-        "debug": "/おうち書道/共有データ/【受講生】/【添削用　作品】/_debug",          # /_debug
         "target_px": (2480, 3508),
     },
     {
@@ -33,7 +32,6 @@ BUCKETS = [
         "print": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/清書用印刷未",
         "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/補正済元画像",
         "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/処理失敗",
-        "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/硬筆/_debug",
         "target_px": (1496, 2083),
     },
     {
@@ -42,14 +40,11 @@ BUCKETS = [
         "print": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/清書用印刷未",
         "processed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/補正済元画像",
         "failed": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/処理失敗",
-        "debug": "/おうち書道/共有データ/【受講生】/【清書用　作品（出品用）】/毛筆/_debug",
         "target_px": (2870, 3937),
     },
 ]
 
 SUPPORTED_EXTS = [".png", ".jpeg", ".jpg", ".pdf"]
-
-DEBUG_SAVE = True  # debug画像をDropbox/_debug に保存
 
 # ===== 外周の黒帯除去 =====
 DARK_RATIO_EDGE = 0.40
@@ -110,26 +105,10 @@ def get_access_token():
 
 dbx = dropbox.Dropbox(get_access_token())
 
-# ===== デバッグ保存 =====
-def save_debug_to_dropbox(pil_img, name: str, debug_dir: str, *, overwrite: bool = True):
-    """現在のバケットの debug_dir に PNG で保存する"""
-    if not DEBUG_SAVE:
-        return
-    try:
-        bio = io.BytesIO()
-        pil_img.save(bio, format="PNG")
-        bio.seek(0)
-        mode = dropbox.files.WriteMode("overwrite") if overwrite else dropbox.files.WriteMode("add")
-        path = f"{debug_dir}/{name}"
-        dbx.files_upload(bio.read(), path, mode=mode)
-        print(f"  [DEBUG_SAVE] {path} に保存")
-    except Exception as e:
-        print(f"  [DEBUG_SAVE_ERROR] {e}")
-
 
 
 def ensure_dropbox_folders(dbx, paths: dict):
-    for k in ("print","processed","failed","debug"):
+    for k in ("print","processed","failed"):
         try:
             dbx.files_create_folder_v2(paths[k])
         except Exception:
@@ -146,7 +125,6 @@ def ensure_dropbox_folders(dbx, paths: dict):
 
 - 入力: fram_image/*.jpg|jpeg|png
 - 出力: complete/
-- デバッグ: debug/ に各段階の画像と JSON
 """
 
 
