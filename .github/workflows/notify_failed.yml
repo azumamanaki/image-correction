@@ -35,4 +35,4 @@ jobs:
           GMAIL_TO:    ${{ secrets.GMAIL_TO }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
-          python scripts/check_failed_and_notify.py
+          python check_failed_and_notify.py
