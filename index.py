@@ -143,7 +143,14 @@ def ensure_dropbox_folders(dbx, paths: dict):
 - 入力: fram_image/*.jpg|jpeg|png
 - 出力: complete/
 """
-
+def remove_red_lines(bgr):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask1 = cv2.inRange(hsv, (0,80,80), (10,255,255))
+    mask2 = cv2.inRange(hsv, (170,80,80), (180,255,255))
+    mask_red = cv2.bitwise_or(mask1, mask2)
+    out = bgr.copy()
+    out[mask_red > 0] = (255,255,255)
+    return out
 
 def auto_trim_black_edges(img: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
     h, w = img.shape[:2]
@@ -377,15 +384,20 @@ def detect_frame_or_compose(img: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]
 
 def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
     bgr0 = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+    # まず元画像で“黒縁トリム”だけは実施（サイズを揃える目的）
     bgr1, _info_edge = auto_trim_black_edges(bgr0)
 
-    # detect は (quad, info) で返るので素直にアンパック
-    quad, _info_frame = detect_frame_or_compose(bgr1)
+    # === 検出専用コピー（赤を白にして検出の邪魔を無くす）===
+    bgr1_det = remove_red_lines(bgr1)
+
+    # 以降の「枠検出」「紙マスク」は bgr1_det で行う
+    quad, _info_frame = detect_frame_or_compose(bgr1_det)
 
     if quad is not None:
+        # ★ ワープ（切り出し）は“赤を消していない” bgr1 に適用
         out = warp_by_quad(bgr1, quad.astype(np.float32), inner_ratio=FRAME_INNER_MARGIN_RATIO)
-
-        # ★ frame ルートでも仕上げ寄せ（process_one と同じ）
+        # 仕上げ寄せ（白さ判定）は従来どおり
         ratios = measure_edge_white_ratio(out, band_frac=0.02, thr=225)
         ih, iw = out.shape[:2]
         inset  = suggest_insets_from_ratios(ratios, iw, ih)
@@ -395,9 +407,8 @@ def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
             out = out[ty:ih-by, lx:iw-rx]
 
     else:
-        mret = build_paper_mask(bgr1)
-        mask = mret[0] if (isinstance(mret, tuple) and len(mret) >= 1) else mret
-
+        # 紙マスク系も“検出は bgr1_det”、実際の切り取りは bgr1
+        mask, _ = build_paper_mask(bgr1_det)
         lcc, area_ratio = largest_cc(mask)
         if area_ratio >= MIN_AREA_RATIO and lcc.max() > 0:
             ys, xs = np.where(lcc > 0)
@@ -408,7 +419,6 @@ def trim_shodo_paper(pil_img: Image.Image) -> Image.Image:
             x1 = min(W-1, x1 - SAFE_MARGIN_PX); y1 = min(H-1, y1 - SAFE_MARGIN_PX)
             out = bgr1[y0:y1+1, x0:x1+1]
 
-            # ★ こちらも仕上げ寄せ
             ratios = measure_edge_white_ratio(out, band_frac=0.02, thr=225)
             ih, iw = out.shape[:2]
             inset  = suggest_insets_from_ratios(ratios, iw, ih)
