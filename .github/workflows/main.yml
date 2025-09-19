@@ -2,20 +2,30 @@ name: Run Image Correction
 
 on:
   schedule:
-    - cron: "7 */2 * * *"   # # index.py 2時間おき(UTC)
-    - cron: "5 0 1 * *"   # 毎月1日 00:05 (UTC) ≒ JST 09:05 → 月次メンテ
+    - cron: "7 */2 * * *"   # index.py 2時間おき(UTC)
+    - cron: "5 0 1 * *"     # 毎月1日 00:05 (UTC) → 月次メンテ
   workflow_dispatch:
-
-# 実行中のものがあれば新しい実行をキャンセル（衝突防止）
-concurrency:
-  group: image_correction
-  cancel-in-progress: true
+    inputs:
+      target:
+        description: "実行対象: auto=両方の判定, correction=補正のみ, monthly=月次のみ"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, correction, monthly]
 
 jobs:
   # ==== 毎時の画像補正 ====
   image_correction:
+    # どのトリガで来たかで実行可否を分岐
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '7 */2 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'auto' || inputs.target == 'correction'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # ジョブ単位のコンカレンシー（補正ジョブ同士のみ排他）
+    concurrency:
+      group: image_correction
+      cancel-in-progress: true
     permissions:
       contents: read
     env:
@@ -24,30 +34,19 @@ jobs:
       DROPBOX_CLIENT_SECRET: ${{ secrets.DROPBOX_CLIENT_SECRET }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
           cache-dependency-path: "requirements.txt"
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip wheel
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run the correction script (with retry)
-        id: run_index
+      - run: python -m pip install --upgrade pip wheel
+      - run: pip install -r requirements.txt
+      - id: run_index
         run: |
           set -e
           python index.py 2>&1 | tee run.log
-
-      - name: Upload debug artifacts on failure
-        if: failure()
+      - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: debug-and-logs
@@ -57,8 +56,15 @@ jobs:
 
   # ==== 月初のフォルダ作成／古いフォルダ削除 ====
   monthly_maintenance:
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '5 0 1 * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'auto' || inputs.target == 'monthly'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # ジョブ単位のコンカレンシー（月次ジョブ同士のみ排他）
+    concurrency:
+      group: monthly_maintenance
+      cancel-in-progress: true
     permissions:
       contents: read
     env:
@@ -67,30 +73,19 @@ jobs:
       DROPBOX_CLIENT_SECRET: ${{ secrets.DROPBOX_CLIENT_SECRET }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
           cache-dependency-path: "requirements.txt"
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip wheel
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
+      - run: python -m pip install --upgrade pip wheel
+      - run: pip install -r requirements.txt
       - name: Create monthly folders
         run: python create_folder.py | tee create_folder.log
-
       - name: Remove old monthly folders
         run: python remove_folder.py | tee remove_folder.log
-
-      - name: Upload maintenance logs
-        if: always()
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: monthly-maintenance-logs
